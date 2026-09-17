@@ -1661,14 +1661,14 @@ const MAX_TEXT = 1800;
 
 const TOOLS = [
     {
-        name: "xhs_check_login",
+        name: "check_login",
         description: "检查小红书登录态是否有效，返回当前登录账号昵称。调其它工具报错时先用它确认 cookie 过期没有。",
         inputSchema: { type: "object", properties: {}, required: [] },
         command: "check-login",
         build: () => ({}),
     },
     {
-        name: "xhs_search",
+        name: "search",
         description: "按关键词搜索小红书笔记，返回笔记列表（含 note_id 与 xsec_token）。看详情或评论前先搜索，把这里返回的 xsec_token 传给后续工具。",
         inputSchema: {
             type: "object",
@@ -1683,7 +1683,7 @@ const TOOLS = [
         build: a => ({ keyword: a.keyword, sort_by: a.sort_by, page: a.page }),
     },
     {
-        name: "xhs_list_feeds",
+        name: "list_feeds",
         description: "获取小红书首页推荐流，相当于「刷小红书」。返回笔记列表（含 note_id 与 xsec_token）。",
         inputSchema: {
             type: "object",
@@ -1697,7 +1697,7 @@ const TOOLS = [
         build: a => ({ category: a.category, cursor_score: a.cursor_score }),
     },
     {
-        name: "xhs_get_feed_detail",
+        name: "get_feed_detail",
         description: "查看一篇小红书笔记的正文与评论。必须提供 note_id，强烈建议同时提供搜索时拿到的 xsec_token，否则拿不到评论区。",
         inputSchema: {
             type: "object",
@@ -1711,7 +1711,7 @@ const TOOLS = [
         build: a => ({ feed_id: a.feed_id, xsec_token: a.xsec_token, load_all_comments: true }),
     },
     {
-        name: "xhs_post_comment",
+        name: "post_comment",
         description: "在一篇笔记下发表评论。必须提供 note_id 与对应的 xsec_token，否则小红书会拒绝。",
         inputSchema: {
             type: "object",
@@ -1726,7 +1726,7 @@ const TOOLS = [
         build: a => ({ feed_id: a.feed_id, content: a.content, xsec_token: a.xsec_token }),
     },
     {
-        name: "xhs_reply_comment",
+        name: "reply_comment",
         description: "回复某条已有评论。需要提供笔记 ID、被回复评论的 comment_id，以及该笔记的 xsec_token。",
         inputSchema: {
             type: "object",
@@ -1742,7 +1742,7 @@ const TOOLS = [
         build: a => ({ feed_id: a.feed_id, comment_id: a.comment_id, content: a.content, xsec_token: a.xsec_token }),
     },
     {
-        name: "xhs_like_feed",
+        name: "like_feed",
         description: "给笔记点赞或取消点赞。",
         inputSchema: {
             type: "object",
@@ -1756,7 +1756,7 @@ const TOOLS = [
         build: a => ({ feed_id: a.feed_id, unlike: a.unlike === true }),
     },
     {
-        name: "xhs_favorite_feed",
+        name: "favorite_feed",
         description: "收藏笔记或取消收藏。",
         inputSchema: {
             type: "object",
@@ -1770,7 +1770,7 @@ const TOOLS = [
         build: a => ({ feed_id: a.feed_id, unfavorite: a.unfavorite === true }),
     },
     {
-        name: "xhs_user_profile",
+        name: "user_profile",
         description: "查看某个小红书用户的主页信息与 TA 的笔记列表。",
         inputSchema: {
             type: "object",
@@ -1784,7 +1784,7 @@ const TOOLS = [
         build: a => ({ user_id: a.user_id, xsec_token: a.xsec_token }),
     },
     {
-        name: "xhs_publish",
+        name: "publish",
         description: "发布一篇小红书图文笔记。至少需要一张图片（传公网可访问的图片 URL）。",
         inputSchema: {
             type: "object",
@@ -1808,7 +1808,11 @@ const TOOLS = [
     },
 ];
 
-const TOOL_BY_NAME = new Map(TOOLS.map(t => [t.name, t]));
+const TOOL_BY_NAME = new Map();
+for (const t of TOOLS) {
+    TOOL_BY_NAME.set(t.name, t);          // Float-compatible short name, e.g. check_login
+    TOOL_BY_NAME.set(`xhs_${t.name}`, t); // Backward-compatible alias, e.g. xhs_check_login
+}
 
 // ── CORS ────────────────────────────────────────────────────────────────────
 
@@ -1943,7 +1947,7 @@ function renderNotes(payload, label) {
     const notes = pickNotes(payload);
     if (notes.length === 0) {
         const hint = payload && payload.error ? payload.error : (payload && payload.msg ? `小红书返回：${oneLine(payload.msg, 120)}` : "");
-        return `${label}没有拿到笔记。${hint}\n常见原因：cookie 过期（先调 xhs_check_login）、关键词太窄、或触发了风控。`;
+        return `${label}没有拿到笔记。${hint}\n常见原因：cookie 过期（先调 check_login）、关键词太窄、或触发了风控。`;
     }
     const lines = notes.map((n, i) => renderNote(n, i + 1));
     const cursor = payload && typeof payload.cursor_score === "string" ? payload.cursor_score : "";
@@ -2054,25 +2058,25 @@ function renderCheckLogin(payload, cookieDiag) {
 
 function renderToolResult(toolName, payload, ctx) {
     switch (toolName) {
-        case "xhs_check_login":
+        case "check_login":
             return renderCheckLogin(payload, ctx && ctx.cookieDiag);
-        case "xhs_search":
+        case "search":
             return { text: renderNotes(payload, "搜索结果"), isError: false };
-        case "xhs_list_feeds":
+        case "list_feeds":
             return { text: renderNotes(payload, "首页推荐"), isError: false };
-        case "xhs_user_profile":
+        case "user_profile":
             return renderProfile(payload);
-        case "xhs_get_feed_detail":
+        case "get_feed_detail":
             return renderDetail(payload);
-        case "xhs_post_comment":
+        case "post_comment":
             return renderAction(payload, "评论已发布");
-        case "xhs_reply_comment":
+        case "reply_comment":
             return renderAction(payload, "回复已发出");
-        case "xhs_like_feed":
+        case "like_feed":
             return renderAction(payload, "点赞操作已完成");
-        case "xhs_favorite_feed":
+        case "favorite_feed":
             return renderAction(payload, "收藏操作已完成");
-        case "xhs_publish":
+        case "publish":
             return renderAction(payload, "笔记已发布");
         default: {
             const text = JSON.stringify(payload);
@@ -2147,7 +2151,7 @@ async function handleRpc(msg, env) {
 
         try {
             const payload = await callCore(tool.command, tool.build(args), env);
-            const rendered = renderToolResult(name, payload, { cookieDiag: inspectCookie(env && env.XHS_COOKIE) });
+            const rendered = renderToolResult(tool.name, payload, { cookieDiag: inspectCookie(env && env.XHS_COOKIE) });
             return rpcResult(id, {
                 content: [{ type: "text", text: rendered.text }],
                 ...(rendered.isError ? { isError: true } : {}),
