@@ -498,15 +498,31 @@ async function executeSingleToolCall(
     };
 
     const tryMcp = () => {
-        for (const server of mcpServers) {
-            if (!server.enabled || !server.discoveredTools) continue;
-            if (hint.serverId && server.id !== hint.serverId) continue;
-            if (server.discoveredTools.find(t => t.name === call.name)) {
-                return executeMcpTool(server, call.name, call.args, context?.signal);
-            }
+    for (const server of mcpServers) {
+        if (!server.enabled || !server.discoveredTools) continue;
+        if (hint.serverId && server.id !== hint.serverId) continue;
+
+        const rawName = call.name.trim();
+        const prefix = `${server.name}.`;
+        const resolvedName = rawName.startsWith(prefix)
+            ? rawName.slice(prefix.length)
+            : rawName;
+
+        const discoveredTool = server.discoveredTools.find(
+            t => t.name === rawName || t.name === resolvedName
+        );
+
+        if (discoveredTool) {
+            return executeMcpTool(
+                server,
+                discoveredTool.name,
+                call.args,
+                context?.signal,
+            );
         }
-        return null;
-    };
+    }
+    return null;
+};
 
     const tryComposite = () => {
         const compositeTool = compositeTools.find(t => (
