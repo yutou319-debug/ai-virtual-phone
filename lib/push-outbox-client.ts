@@ -30,6 +30,7 @@ type OutboxEntry = {
         appTags?: string[];
         followUpCount?: number;
         armAt?: string;
+        pushGenerated?: boolean;
         /** 云端触发快捷动作失败的摘要；成功时不带这个字段 */
         shortcutDeliveryError?: string;
     } | null;
@@ -189,7 +190,17 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
 
                     const followUpIndex = typeof meta.followUpIndex === "number" ? meta.followUpIndex : undefined;
                     const existingMessages = loadChatMessages(sessionId);
-                    if (followUpIndex && existingMessages.some(m => m.role === "assistant" && m.followUpIndex === followUpIndex)) {
+                    // 已投递通知的云端原文必须回传；另一份本地回复不等于这条消息。
+                    // 用 outbox 主键去重，避免 ACK 失败后重复拉取时再次插入。
+                    const responseBatchId = `push_outbox_${entry.id}`;
+                    if (existingMessages.some(m => m.responseBatchId === responseBatchId)) {
+                        clearTimedWakeIfHandled(entry.trigger_key);
+                        consumedIds.push(entry.id);
+                        if (entry.trigger_key) handledTriggerKeys.add(entry.trigger_key);
+                        continue;
+                    }
+                    const pushGenerated = meta.pushGenerated === true;
+                    if (!pushGenerated && followUpIndex && existingMessages.some(m => m.role === "assistant" && m.followUpIndex === followUpIndex)) {
                         clearTimedWakeIfHandled(entry.trigger_key);
                         consumedIds.push(entry.id);
                         if (entry.trigger_key) handledTriggerKeys.add(entry.trigger_key);
@@ -197,11 +208,12 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
                     }
 
                     const armAtMs = typeof meta.armAt === "string" ? Date.parse(meta.armAt) : NaN;
-                    if (Number.isFinite(armAtMs) && existingMessages.some(m => {
+                    const hasReplyAfterArm = Number.isFinite(armAtMs) && existingMessages.some(m => {
                         if (m.role !== "assistant") return false;
                         const createdMs = Date.parse(m.createdAt);
                         return createdMs > armAtMs && createdMs < passStartMs;
-                    })) {
+                    });
+                    if (!pushGenerated && hasReplyAfterArm) {
                         clearTimedWakeIfHandled(entry.trigger_key);
                         consumedIds.push(entry.id);
                         if (entry.trigger_key) handledTriggerKeys.add(entry.trigger_key);
@@ -236,9 +248,10 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
                         meta.prevCount ?? 0,
                         followUpIndex,
                         existingMessages,
-                        { silent: options?.silent !== false, ...(shortcutMarker ? { shortcutMarker } : {}) },
+                        { silent: options?.silent !== false, responseBatchId, ...(shortcutMarker ? { shortcutMarker } : {}) },
                     );
-                    if (hasVisible && newCount < 10) scheduleFollowUp(sessionId, newCount, stateValues);
+                    // 已有本地回复时只补回通知原文，不覆盖本地回复的追问排期。
+                    if (hasVisible && newCount < 10 && !hasReplyAfterArm) scheduleFollowUp(sessionId, newCount, stateValues);
                     clearTimedWakeIfHandled(entry.trigger_key);
                     consumedIds.push(entry.id);
                     if (entry.trigger_key) handledTriggerKeys.add(entry.trigger_key);
