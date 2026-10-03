@@ -632,11 +632,12 @@ Deno.serve(async (request: Request) => {
           `push_jobs?user_id=eq.${OWNER_ID}&trigger_key=eq.${encodeURIComponent(triggerKey)}`,
           { method: "DELETE", headers: { Prefer: "return=representation" } },
         ));
+        const jobId = `job_${crypto.randomUUID()}`;
         await readJson(await rest("push_jobs", {
           method: "POST",
           headers: { Prefer: "return=representation" },
           body: JSON.stringify([{
-            id: `job_${crypto.randomUUID()}`,
+            id: jobId,
             user_id: OWNER_ID,
             trigger_key: triggerKey,
             kind,
@@ -645,10 +646,32 @@ Deno.serve(async (request: Request) => {
             payload: await encryptPayload(plainJson, config.payload_key),
           }]),
         }));
-        return json({ ok: true });
+        return json({ ok: true, jobId });
       }
       if (request.method === "PATCH") {
         if (!triggerKey) return json({ ok: false, error: "缺少 triggerKey。" }, 400);
+        if (body.claimLocal === true) {
+          const jobId = cleanText(body.jobId, 100);
+          if (!jobId) return json({ ok: false, error: "缺少 jobId。" }, 400);
+          const filter = `user_id=eq.${OWNER_ID}&id=eq.${encodeURIComponent(jobId)}&trigger_key=eq.${encodeURIComponent(triggerKey)}`;
+          // 与生成器 pending→running 的认领竞争同一行，只有一端能获得回复所有权。
+          if (body.preferCloud !== true) {
+            const won = await readJson<Array<{ id: string }>>(await rest(`push_jobs?${filter}&status=eq.pending`, {
+              method: "PATCH", headers: { Prefer: "return=representation" },
+              body: JSON.stringify({ status: "cancelled", result_note: "local reply owns delivery", updated_at: new Date().toISOString() }),
+            }));
+            if (won.length > 0) return json({ ok: true, localOwns: true });
+          } else {
+            // 页面已进后台：由云端完成通知和回传，本地结果不先写进聊天。
+            await readJson(await rest(`push_jobs?${filter}&status=eq.pending`, {
+              method: "PATCH", headers: { Prefer: "return=representation" },
+              body: JSON.stringify({ execute_at: new Date().toISOString(), updated_at: new Date().toISOString() }),
+            }));
+          }
+          const rows = await readJson<Array<{ status: string; result_note?: string }>>(await rest(`push_jobs?${filter}&select=status,result_note&limit=1`));
+          const row = rows[0];
+          return json({ ok: true, localOwns: !row || row.status === "failed" || (row.status === "cancelled" && row.result_note === "local reply owns delivery") });
+        }
         const executeAt = new Date(Date.now() + (body.runNow === true ? 0 : 90_000)).toISOString();
         await readJson(await rest(
           `push_jobs?user_id=eq.${OWNER_ID}&trigger_key=eq.${encodeURIComponent(triggerKey)}&status=eq.pending`,
@@ -668,8 +691,10 @@ Deno.serve(async (request: Request) => {
           ? `trigger_key=eq.${encodeURIComponent(triggerKey)}`
           : `trigger_key=like.${encodeURIComponent(`${triggerPrefix}%`)}`
             + (excludeKey ? `&trigger_key=neq.${encodeURIComponent(excludeKey)}` : "");
+        const jobId = cleanText(body.jobId, 100);
+        const idFilter = jobId ? `&id=eq.${encodeURIComponent(jobId)}` : "";
         await readJson(await rest(
-          `push_jobs?user_id=eq.${OWNER_ID}&status=eq.pending&${keyFilter}`,
+          `push_jobs?user_id=eq.${OWNER_ID}&status=eq.pending&${keyFilter}${idFilter}`,
           { method: "DELETE", headers: { Prefer: "return=representation" } },
         ));
         return json({ ok: true });

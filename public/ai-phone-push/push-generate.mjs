@@ -487,10 +487,17 @@ Deno.serve(async (req: Request) => {
   const job = claimed[0];
   if (!job) return new Response("already claimed", { status: 200 });
 
-  const finish = (status: "done" | "failed", note: string) => rest(`push_jobs?id=eq.${encodeURIComponent(job.id)}`, {
+  const finish = (status: "done" | "failed", note: string) => rest(`push_jobs?id=eq.${encodeURIComponent(job.id)}&status=eq.running`, {
     method: "PATCH",
     body: JSON.stringify({ status, result_note: note.slice(0, 300), updated_at: new Date().toISOString() }),
   }).catch(() => undefined);
+
+  const stillOwnsJob = async (): Promise<boolean> => {
+    const response = await rest(`push_jobs?id=eq.${encodeURIComponent(job.id)}&status=eq.running&select=id&limit=1`);
+    if (!response.ok) throw new Error(`job ownership check failed: ${response.status}`);
+    const rows = await response.json() as Array<{ id: string }>;
+    return rows.length > 0;
+  };
 
   // 分段进度：卡死时 result_note 会停在最后完成的一步，精确定位死点
   const startedAt = Date.now();
@@ -595,6 +602,7 @@ Deno.serve(async (req: Request) => {
       return;
     }
 
+    if (!(await stillOwnsJob())) return;
     await progress("llm request started");
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 300_000);
@@ -620,6 +628,8 @@ Deno.serve(async (req: Request) => {
       await finish("failed", "empty response");
       return;
     }
+    // 新一轮预约可能删除旧任务；旧生成器不能继续发通知或执行快捷动作。
+    if (!(await stillOwnsJob())) return;
 
     // ── 离线来电：复用小手机既有的通话协议，并兼容已经预约的旧任务 ──
     // 仅在回复开头 200 字内识别严格的「我（向某人）发起了语音通话」标签，
@@ -1040,6 +1050,7 @@ Deno.serve(async (req: Request) => {
       return;
     }
 
+    if (!(await stillOwnsJob())) return;
     await progress(`llm ok, ${rawText.length} chars${deliverAsCall ? ", call" : ""}`);
     const outboxResponse = await rest("push_outbox", {
       method: "POST",

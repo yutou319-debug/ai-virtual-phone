@@ -114,7 +114,7 @@ export function startBailoutHeartbeat(triggerKey: string): () => void {
     return bgSetInterval(beat, HEARTBEAT_INTERVAL_MS);
 }
 
-export type ReplyBailoutHandle = { settle: () => void };
+export type ReplyBailoutHandle = { settle: () => void; claimLocal: () => Promise<boolean> };
 
 /**
  * 发送兜底：本地开始生成回复的同时，把同一份请求快照（无工具的非流式孪生）
@@ -177,20 +177,22 @@ export async function armReplyBailout(params: {
         if (response) console.warn("[PushBailout] 回复兜底预约失败：HTTP", response.status);
         return null;
     }
+    const armed = await response.json().catch(() => ({})) as { jobId?: string };
     if (params.signal?.aborted) {
-        await deleteBailoutJob(triggerKey);
+        await deleteBailoutJob(triggerKey, armed.jobId);
         return null;
     }
 
     const stopHeartbeat = startBailoutHeartbeat(triggerKey);
     let settled = false;
+    let ownership: Promise<boolean> | null = null;
     let detachAbort: (() => void) | null = null;
     const settle = () => {
         if (settled) return;
         settled = true;
         stopHeartbeat();
         detachAbort?.();
-        void deleteBailoutJob(triggerKey);
+        void deleteBailoutJob(triggerKey, armed.jobId);
     };
     if (params.signal) {
         const onAbort = () => settle();
@@ -199,14 +201,34 @@ export async function armReplyBailout(params: {
     }
     return {
         settle,
+        claimLocal: () => {
+            if (ownership) return ownership;
+            // 旧云函数没有任务 ID：暂沿用原行为，重新部署后启用原子认领。
+            if (!armed.jobId) return Promise.resolve(true);
+            stopHeartbeat();
+            settled = true;
+            detachAbort?.();
+            ownership = (async () => {
+                const res = await pushJobsFetch({
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ triggerKey, jobId: armed.jobId, claimLocal: true, preferCloud: document.hidden }),
+                });
+                if (!res.ok) throw new Error(`回复所有权检查失败（HTTP ${res.status}）`);
+                const decision = await res.json() as { localOwns?: boolean };
+                if (typeof decision.localOwns !== "boolean") throw new Error("请重新部署个人离线推送以更新云函数。");
+                return decision.localOwns;
+            })();
+            return ownership;
+        },
     };
 }
 
-async function deleteBailoutJob(triggerKey: string): Promise<void> {
+async function deleteBailoutJob(triggerKey: string, jobId?: string): Promise<void> {
     await pushJobsFetch({
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ triggerKey }),
+        body: JSON.stringify({ triggerKey, ...(jobId ? { jobId } : {}) }),
     }).catch(() => undefined);
 }
 

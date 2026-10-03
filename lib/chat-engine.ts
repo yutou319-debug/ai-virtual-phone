@@ -2429,7 +2429,8 @@ async function generateNativeChatCompletion(
 }
 
 type ReplyBailoutRef = {
-    current: { settle: () => void } | null;
+    current: import("./push-bailout-client").ReplyBailoutHandle | null;
+    ready: Promise<void> | null;
     closed: boolean;
     superseded: boolean;
     shortcutHandles: ShortcutContinuationHandle[];
@@ -2487,6 +2488,7 @@ export async function generateChatCompletion(
     // 本地完成即撤销；App 被杀则心跳停跳，服务端接管生成并推送。
     const bailoutRef: ReplyBailoutRef = {
         current: null,
+        ready: null,
         closed: false,
         superseded: false,
         shortcutHandles: [],
@@ -2494,7 +2496,30 @@ export async function generateChatCompletion(
         shortcutCancelled: false,
     };
     try {
-        return await generateChatCompletionCore(session, history, options, callbacks, bailoutRef);
+        const ensureLocalOwnership = async () => {
+            await bailoutRef.ready;
+            if (bailoutRef.superseded) return;
+            if (bailoutRef.current && !(await bailoutRef.current.claimLocal())) {
+                // 云端已接管：不把本地孪生回复写入聊天，云端原文经 outbox 回传。
+                const error = new Error("云端正在完成本轮回复。");
+                error.name = "AbortError";
+                throw error;
+            }
+        };
+        const guardedCallbacks: ChatCompletionCallbacks = {
+            ...callbacks,
+            onTextPart: callbacks?.onTextPart ? async (...args) => {
+                await ensureLocalOwnership();
+                await callbacks?.onTextPart?.(...args);
+            } : undefined,
+            onNativeToolAssistantTurn: callbacks?.onNativeToolAssistantTurn ? async (...args) => {
+                await ensureLocalOwnership();
+                await callbacks?.onNativeToolAssistantTurn?.(...args);
+            } : undefined,
+        };
+        const result = await generateChatCompletionCore(session, history, options, guardedCallbacks, bailoutRef);
+        await ensureLocalOwnership();
+        return result;
     } catch (err) {
         if (options?.signal?.aborted) bailoutRef.shortcutCancelled = true;
         throw err;
@@ -2544,7 +2569,7 @@ async function generateChatCompletionCore(
         const bailoutMessages = [...llmMessages];
         // 这条路径不挂续跑（见上），所以也不能向角色承诺第二轮
         maybeAppendShortcutCapability(bailoutMessages, { continuationAvailable: false });
-        void import("./push-bailout-client").then(async mod => {
+        bailoutRef.ready = import("./push-bailout-client").then(async mod => {
             const handle = await mod.armReplyBailout({
                 sessionId: session.id,
                 characterName: character.name,
