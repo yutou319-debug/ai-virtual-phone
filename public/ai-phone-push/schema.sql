@@ -77,7 +77,7 @@ create table if not exists public.push_jobs (
 );
 alter table public.push_jobs drop constraint if exists push_jobs_kind_check;
 alter table public.push_jobs add constraint push_jobs_kind_check
-  check (kind in ('followup', 'reply_bailout', 'timed_task', 'bridge_scan', 'shortcut_resume'));
+  check (kind in ('followup', 'reply_bailout', 'reply_once', 'timed_task', 'bridge_scan', 'shortcut_resume'));
 create unique index if not exists push_jobs_trigger_idx on public.push_jobs (user_id, trigger_key);
 create index if not exists push_jobs_due_idx on public.push_jobs (status, execute_at);
 
@@ -338,7 +338,10 @@ select cron.unschedule(jobid)
 select cron.schedule('ai-phone-personal-push-jobs-scan', '* * * * *', $CRON$
   update public.push_jobs
      set status = 'pending', updated_at = now()
-   where status = 'running' and updated_at < now() - interval '20 minutes';
+   where status = 'running' and kind <> 'reply_once' and updated_at < now() - interval '20 minutes';
+
+  update public.push_jobs set status = 'failed', result_note = 'Cloud execution timed out; not retried to avoid duplicate charges', updated_at = now()
+   where status = 'running' and kind = 'reply_once' and updated_at < now() - interval '20 minutes';
 
   select net.http_post(
     url     := 'https://__PROJECT_REF__.supabase.co/functions/v1/push-generate',

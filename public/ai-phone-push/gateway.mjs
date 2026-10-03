@@ -34,7 +34,7 @@ type EncryptedPayload = { v: 1; iv: string; tag: string; ct: string };
 
 const OWNER_ID = "owner";
 const MAX_PAYLOAD_BYTES = 900_000;
-const ALLOWED_JOB_KINDS = new Set(["followup", "reply_bailout", "timed_task", "shortcut_resume"]);
+const ALLOWED_JOB_KINDS = new Set(["followup", "reply_bailout", "reply_once", "timed_task", "shortcut_resume"]);
 const SHORTCUT_RESULT_MODES = new Set(["none", "text", "image"]);
 const SHORTCUT_MAX_ARGS_BYTES = 16_000;
 const SHORTCUT_COMMAND_ID_PATTERN = /^cmd_[a-z0-9-]{20,80}$/i;
@@ -46,7 +46,7 @@ const SHORTCUT_COMMAND_SELECT = [
 ].join(",");
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "content-type, x-ai-phone-service-key, x-ai-phone-origin",
+  "Access-Control-Allow-Headers": "content-type, x-ai-phone-service-key, x-ai-phone-origin, x-ai-phone-job-id",
   "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
 };
 const VERIFIED_KEY_TTL_MS = 5 * 60 * 1000;
@@ -615,6 +615,14 @@ Deno.serve(async (request: Request) => {
     }
 
     if (action === "jobs") {
+      if (request.method === "GET") {
+        const jobId = cleanText(request.headers.get("x-ai-phone-job-id"), 100);
+        if (!jobId) return json({ ok: false, error: "缺少任务标识。" }, 400);
+        const rows = await readJson<Array<{ status: string; result_note?: string }>>(await rest(
+          `push_jobs?user_id=eq.${OWNER_ID}&id=eq.${encodeURIComponent(jobId)}&select=status,result_note&limit=1`,
+        ));
+        return json({ ok: true, status: rows[0]?.status ?? "missing", note: rows[0]?.result_note });
+      }
       const body = await request.json().catch(() => ({})) as Record<string, unknown>;
       const triggerKey = cleanText(body.triggerKey, 200);
       if (request.method === "POST") {
@@ -628,6 +636,36 @@ Deno.serve(async (request: Request) => {
         if (plainJson.length > MAX_PAYLOAD_BYTES) return json({ ok: false, error: "快照过大。" }, 413);
         const config = await loadConfig();
         if (!config.payload_key) throw new Error("预约加密密钥初始化失败。");
+        if (kind === "reply_once") {
+          // Never replace a paid/running/failed task for the same input. The unique
+          // (owner, trigger_key) index arbitrates simultaneous submissions too.
+          await readJson(await rest("push_jobs", {
+            method: "POST",
+            headers: { Prefer: "resolution=ignore-duplicates,return=representation" },
+            body: JSON.stringify([{
+              id: `job_${crypto.randomUUID()}`, user_id: OWNER_ID, trigger_key: triggerKey,
+              kind, execute_at: new Date().toISOString(), status: "pending",
+              payload: await encryptPayload(plainJson, config.payload_key),
+            }]),
+          }));
+          const rows = await readJson<Array<{ id: string; status: string }>>(await rest(
+            `push_jobs?user_id=eq.${OWNER_ID}&trigger_key=eq.${encodeURIComponent(triggerKey)}&select=id,status&limit=1`,
+          ));
+          const job = rows[0];
+          if (!job) throw new Error("单次回复任务未确认。不可改用本地重试。");
+          if (job.status === "pending" && config.cron_secret) {
+            // Cron is a dispatch fallback only. push-generate atomically claims
+            // pending -> running, so duplicate dispatches cannot call the API twice.
+            const dispatch = fetch(`${supabaseUrl}/functions/v1/push-generate`, {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ jobId: job.id, token: config.cron_secret }),
+            }).then(response => response.text()).catch(() => undefined);
+            const runtime = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
+            if (runtime?.waitUntil) runtime.waitUntil(dispatch);
+            else await dispatch;
+          }
+          return json({ ok: true, jobId: job.id, singleExecutor: true });
+        }
         await readJson(await rest(
           `push_jobs?user_id=eq.${OWNER_ID}&trigger_key=eq.${encodeURIComponent(triggerKey)}`,
           { method: "DELETE", headers: { Prefer: "return=representation" } },
@@ -746,7 +784,10 @@ Deno.serve(async (request: Request) => {
           await sql.unsafe(`select cron.schedule('ai-phone-personal-push-jobs-scan', '* * * * *', $CRON$
   update public.push_jobs
      set status = 'pending', updated_at = now()
-   where status = 'running' and updated_at < now() - interval '20 minutes';
+   where status = 'running' and kind <> 'reply_once' and updated_at < now() - interval '20 minutes';
+
+  update public.push_jobs set status = 'failed', result_note = 'Cloud execution timed out; not retried to avoid duplicate charges', updated_at = now()
+   where status = 'running' and kind = 'reply_once' and updated_at < now() - interval '20 minutes';
 
   select net.http_post(
     url     := '${supabaseUrl}/functions/v1/push-generate',

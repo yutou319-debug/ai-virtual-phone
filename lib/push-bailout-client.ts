@@ -224,6 +224,72 @@ export async function armReplyBailout(params: {
     };
 }
 
+/** A stable input ID prevents retries/reopens from starting a second paid request. */
+export async function queueCloudReplyOnce(params: Parameters<typeof armReplyBailout>[0]): Promise<boolean> {
+    // Subscription/network uncertainty must never switch an active cloud reply to local.
+    if (!bailoutEnabled()) return false;
+    const anchor = params.replyAfter?.localMessageId;
+    if (!anchor) throw new Error("无法确认本轮输入标识；为避免重复扣费，未调用模型。");
+    if (params.signal?.aborted) throw Object.assign(new Error("已停止等待"), { name: "AbortError" });
+    const triggerKey = `reply-once:${params.sessionId}:${anchor}`;
+    const response = await pushJobsFetch({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            triggerKey,
+            kind: "reply_once",
+            executeAt: new Date().toISOString(),
+            payload: {
+                request: params.request,
+                notify: { title: params.characterName, url: "/" },
+                merge: {
+                    sessionId: params.sessionId,
+                    prevCount: 0,
+                    regexes: params.regexes,
+                    characterName: params.characterName,
+                    userName: params.userName ?? "用户",
+                    appId: "chat", appTags: ["chat", "text"],
+                    armAt: new Date().toISOString(),
+                    replyAfterLocalMessageId: anchor,
+                    replyAfterCreatedAt: params.replyAfter?.createdAt,
+                },
+            },
+        }),
+    }).catch(() => null);
+    if (!response?.ok) {
+        throw new Error("单次云端回复提交未确认。请确认已重新部署个人离线推送；为避免重复扣费，没有改用手机再次生成。");
+    }
+    const queued = await response.json() as { jobId?: string; singleExecutor?: boolean };
+    if (!queued.jobId || queued.singleExecutor !== true) {
+        throw new Error("个人云版本不支持单次生成，请重新部署离线推送；未调用本地模型。");
+    }
+    const { consumeServerOutbox } = await import("./push-outbox-client");
+    for (let attempt = 0; attempt < 120; attempt++) {
+        if (params.signal?.aborted) throw Object.assign(new Error("已停止等待；云端任务仍保留"), { name: "AbortError" });
+        const statusResponse = await pushJobsFetch({
+            method: "GET",
+            headers: { "x-ai-phone-job-id": queued.jobId },
+        }).catch(() => null);
+        if (statusResponse?.ok) {
+            const status = await statusResponse.json() as { status?: string; note?: string };
+            if (["failed", "cancelled"].includes(status.status ?? "")) {
+                throw new Error(`云端回复未完成：${status.note || status.status}。没有自动再次生成。`);
+            }
+            if (status.status === "done") {
+                await consumeServerOutbox({ force: true });
+                return true;
+            }
+        }
+        if (!document.hidden) await consumeServerOutbox({ force: true });
+        await new Promise<void>((resolve, reject) => {
+            const onAbort = () => { clearTimeout(timer); reject(Object.assign(new Error("已停止等待"), { name: "AbortError" })); };
+            const timer = setTimeout(() => { params.signal?.removeEventListener("abort", onAbort); resolve(); }, 5000);
+            params.signal?.addEventListener("abort", onAbort, { once: true });
+        });
+    }
+    throw new Error("云端回复暂未确认完成。任务仍保留，没有自动再次调用模型。");
+}
+
 async function deleteBailoutJob(triggerKey: string, jobId?: string): Promise<void> {
     await pushJobsFetch({
         method: "DELETE",

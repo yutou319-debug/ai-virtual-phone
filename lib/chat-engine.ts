@@ -2552,48 +2552,33 @@ async function generateChatCompletionCore(
     const { llmMessages, character, config, preset, regexes, userIdentity, toolsEnabled } = await buildChatPromptMessages(session, history, options);
     const requestAppTags = mergeAppTags(options?.appTags, options?.promptProfile?.appTags, options?.appId ?? "chat");
 
-    // 追问有自己的排期时兜底（followup:key），这里只为普通回复生成挂单。
-    // 不 await：挂单失败或慢都不拖累本地生成；生成先结束则通过 closed 标记补撤销。
+    // Ordinary push-enabled replies have one executor: the personal cloud.
+    // Queue BEFORE any local API call; uncertainty never falls back to a second call.
     if (!session.isGroup && (options?.appId ?? "chat") === "chat" && !(requestAppTags ?? []).includes("followup")) {
-        // 云端兜底可能在另一台机器上生成并经真实微信发送。把本轮最后一条
-        // 用户输入/系统指令作为因果锚点带过去，避免回复拉回本地后因手机与
-        // 云服务器存在亚秒级时钟偏差，被按 createdAt 重排到触发消息前面。
         const replyAfterMessage = [...history].reverse().find(message =>
             message.sessionId === session.id
             && (message.role === "user" || message.mediaType === "system_instruction")
-            && Boolean(message.id)
-            && Boolean(message.createdAt),
+            && Boolean(message.id) && Boolean(message.createdAt),
         );
-        // 消息数组必须同步定格：下面的工具循环会往 llmMessages 里 splice 中间轮次，
-        // 等动态 import 的微任务跑到时数组早就不是这一轮的原样了。组装请求本身
-        // 留在微任务里，别把这条热路径上的回复往后拖。
-        // 顺带注入快捷动作目录——服务端接管生成时执行不了本地工具循环，但
-        // 标记式【快捷动作：名称】push-generate 是认的，不注入角色就只会说"我没有工具"。
-        //
-        // 这里刻意不挂「结果续跑」快照：普通回复兜底是每条消息都要挂一次的，
-        // 续跑快照会把上传体积翻倍（两份完整提示词），提示词大时会撞上服务端
-        // 900KB 上限（app/api/push/jobs/route.ts），一撞就是整条兜底挂不上、
-        // 静默丢掉离线回复——为了第二轮续跑赔掉第一轮，不划算。冷场重连与定时
-        // 唤醒是低频任务，那两条照常挂续跑。
-        const bailoutMessages = [...llmMessages];
-        // 这条路径不挂续跑（见上），所以也不能向角色承诺第二轮
-        maybeAppendShortcutCapability(bailoutMessages, { continuationAvailable: false });
-        bailoutRef.ready = import("./push-bailout-client").then(async mod => {
-            const handle = await mod.armReplyBailout({
-                sessionId: session.id,
-                characterName: character.name,
-                userName: userIdentity?.name,
-                regexes,
-                request: buildProviderRequest(config, preset, toLlmRequestMessages(bailoutMessages)),
-                replyAfter: replyAfterMessage
-                    ? { localMessageId: replyAfterMessage.id, createdAt: replyAfterMessage.createdAt }
-                    : undefined,
-                signal: options?.signal,
-            });
-            if (!handle) return;
-            if (bailoutRef.closed || bailoutRef.superseded) handle.settle();
-            else bailoutRef.current = handle;
-        }).catch(() => undefined);
+        const cloudMessages = [...llmMessages];
+        maybeAppendShortcutCapability(cloudMessages, { continuationAvailable: false });
+        const cloud = await import("./push-bailout-client");
+        const delegated = await cloud.queueCloudReplyOnce({
+            sessionId: session.id,
+            characterName: character.name,
+            userName: userIdentity?.name,
+            regexes,
+            request: buildProviderRequest(config, preset, toLlmRequestMessages(cloudMessages)),
+            replyAfter: replyAfterMessage
+                ? { localMessageId: replyAfterMessage.id, createdAt: replyAfterMessage.createdAt }
+                : undefined,
+            signal: options?.signal,
+        });
+        if (delegated) {
+            const error = new Error("本轮回复已由个人云生成并回传。");
+            error.name = "AbortError";
+            throw error;
+        }
     }
 
     if (toolsEnabled && nativeToolProtocolForConfig(config) && getEnabledTools(options?.appId ?? "chat").length > 0) {

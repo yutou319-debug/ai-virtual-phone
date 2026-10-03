@@ -586,22 +586,23 @@ Deno.serve(async (req: Request) => {
     const subsResponse = await rest(`push_subscriptions?user_id=eq.${encodeURIComponent(job.user_id)}&select=endpoint,p256dh,auth`);
     const subs = subsResponse.ok ? await subsResponse.json() as SubscriptionRow[] : [];
     if (subs.length === 0 && payload.weixin?.force !== true) {
-      await finish("done", "no_subscription");
+      await finish(job.kind === "reply_once" ? "failed" : "done", "no_subscription");
       return;
     }
 
     // 硬闸：每账号每天最多 50 条服务端兜底生成，超出只存任务记录不烧 token。
     // 只统计 push-generate 真正生成的回箱行，不让现实桥的纯存档行占用额度。
-    const dayStart = `${new Date().toISOString().slice(0, 10)}T00:00:00Z`;
-    const capResponse = await rest(
-      `push_outbox?user_id=eq.${encodeURIComponent(job.user_id)}&created_at=gte.${encodeURIComponent(dayStart)}&meta->>pushGenerated=eq.true&select=id&limit=${DAILY_GENERATION_CAP + 1}`,
-    );
-    const todayRows = capResponse.ok ? await capResponse.json() as unknown[] : [];
-    if (todayRows.length >= DAILY_GENERATION_CAP) {
-      await finish("done", `daily cap (${DAILY_GENERATION_CAP}) reached`);
-      return;
+    if (job.kind !== "reply_once") {
+      const dayStart = `${new Date().toISOString().slice(0, 10)}T00:00:00Z`;
+      const capResponse = await rest(
+        `push_outbox?user_id=eq.${encodeURIComponent(job.user_id)}&created_at=gte.${encodeURIComponent(dayStart)}&meta->>pushGenerated=eq.true&meta->>cloudSingleExecutor=is.null&select=id&limit=${DAILY_GENERATION_CAP + 1}`,
+      );
+      const todayRows = capResponse.ok ? await capResponse.json() as unknown[] : [];
+      if (todayRows.length >= DAILY_GENERATION_CAP) {
+        await finish("done", `daily cap (${DAILY_GENERATION_CAP}) reached`);
+        return;
+      }
     }
-
     if (!(await stillOwnsJob())) return;
     await progress("llm request started");
     const controller = new AbortController();
@@ -623,6 +624,11 @@ Deno.serve(async (req: Request) => {
       return;
     }
     const data = await llmResponse.json();
+    const finishReason = data?.choices?.[0]?.finish_reason ?? data?.candidates?.[0]?.finishReason ?? data?.stop_reason;
+    if (["length", "max_tokens", "MAX_TOKENS"].includes(finishReason)) {
+      await finish("failed", "API 达到输出 token 上限；回复被截断，没有自动重试。");
+      return;
+    }
     let rawText = extractResponseText(payload.request.providerKind, data).trim();
     if (!rawText) {
       await finish("failed", "empty response");
@@ -1064,6 +1070,7 @@ Deno.serve(async (req: Request) => {
         meta: {
           ...(payload.merge ?? {}),
           pushGenerated: true,
+          ...(job.kind === "reply_once" ? { cloudSingleExecutor: true } : {}),
           ...(executedShortcutMarker ? { shortcutMarker: executedShortcutMarker } : {}),
         },
       }]),
