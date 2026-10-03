@@ -83,3 +83,31 @@ export function createSseJsonParser(): SseJsonParser {
         },
     };
 }
+
+/** EOF alone is not proof that a provider finished generating. */
+export function createSseCompletionTracker() {
+    let completed = false;
+    let limited = false;
+    return {
+        event(text: string) {
+            if (/(?:^|\n)data:\s*\[DONE\]\s*(?:\n|$)/.test(text)) completed = true;
+        },
+        parsed(value: unknown) {
+            if (!value || typeof value !== "object") return;
+            const data = value as Record<string, any>;
+            const reason = data.choices?.[0]?.finish_reason
+                ?? data.candidates?.[0]?.finishReason
+                ?? data.delta?.stop_reason ?? data.stop_reason;
+            if (typeof reason === "string" && reason) {
+                completed = true;
+                if (["length", "max_tokens", "MAX_TOKENS"].includes(reason)) limited = true;
+            }
+            if (data.type === "message_stop") completed = true;
+            if (data.error || data.type === "error") throw new Error("API 流式响应返回错误，回复未完成。");
+        },
+        assertComplete() {
+            if (limited) throw new Error("API 达到输出 token 上限，回复被截断；请检查最大输出长度设置。");
+            if (!completed) throw new Error("API 流式连接结束，但未收到完成信号；回复可能被截断，请检查 API 日志。");
+        },
+    };
+}

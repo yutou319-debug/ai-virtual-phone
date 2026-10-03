@@ -1,6 +1,6 @@
 // lib/chat-engine.ts
 
-import { createSseJsonParser } from "./sse-json";
+import { createSseJsonParser, createSseCompletionTracker } from "./sse-json";
 import { maybeAppendShortcutCapability } from "./offline-shortcut-capability";
 import { loadCharacters } from "./character-storage";
 import { buildScreenEffectPromptHint } from "./chat-screen-effects";
@@ -735,7 +735,9 @@ async function readSseStream(
 
     // 容错解析：中转把长 JSON 行切开时做碎片重组，不再静默丢增量（见 sse-json.ts）
     const sseParser = createSseJsonParser();
+    const completion = createSseCompletionTracker();
     const handleParsed = async (parsed: unknown) => {
+        completion.parsed(parsed);
         const parts = parseProviderStreamDelta(providerKind, parsed);
         if (parts.reasoning) {
             await callbacks?.onReasoningDelta?.(parts.reasoning);
@@ -749,6 +751,7 @@ async function readSseStream(
         }
     };
     const handleEvent = async (eventText: string) => {
+        completion.event(eventText);
         // 原始流只为调试快照保留头部：长输出整条累积会把低内存设备的 WebView 顶爆
         if (rawResponse.length < 65_536) rawResponse += `${eventText}\n`;
         for (const parsed of sseParser.pushEvent(eventText)) {
@@ -778,6 +781,7 @@ async function readSseStream(
         content += finalContent;
         await callbacks?.onDelta?.(finalContent);
     }
+    completion.assertComplete();
     return { content, rawResponse };
 }
 
@@ -1128,7 +1132,9 @@ export async function sendLLMToolStreamRequest(
         // 容错解析：中转把超长工具参数 JSON 行切开时做碎片重组，
         // 不再因单行 JSON Parse error 杀掉整条流（写 APP 大参数时高发）
         const sseParser = createSseJsonParser();
+        const completion = createSseCompletionTracker();
         const handleParsedDelta = async (data: unknown) => {
+            completion.parsed(data);
             {
                     const delta = parseProviderStreamDelta(request.providerKind, data);
                     if (delta.reasoning) {
@@ -1170,6 +1176,7 @@ export async function sendLLMToolStreamRequest(
             const parsed = parseSseEvents(buffer);
             buffer = parsed.rest;
             for (const event of parsed.events) {
+                completion.event(event);
                 if (rawResponse.length < 65_536) rawResponse += `${event}\n`;
                 for (const data of sseParser.pushEvent(event)) {
                     await handleParsedDelta(data);
@@ -1178,6 +1185,7 @@ export async function sendLLMToolStreamRequest(
         }
 
         if (buffer.trim()) {
+            completion.event(buffer);
             if (rawResponse.length < 65_536) rawResponse += buffer.trim();
             for (const data of sseParser.pushEvent(buffer)) {
                 await handleParsedDelta(data);
@@ -1191,6 +1199,7 @@ export async function sendLLMToolStreamRequest(
             content += finalContent;
             await callbacks?.onDelta?.(finalContent);
         }
+        completion.assertComplete();
         content = await applyChatPluginLlmResponse(content, pluginPurpose, options?.debugSessionId);
 
         const sanitizedMessages = request.messagesForLog.map(m => ({

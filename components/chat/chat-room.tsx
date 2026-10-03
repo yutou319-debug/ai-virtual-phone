@@ -3314,6 +3314,16 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             });
             setMessages(prev => [...prev, errorMsg]);
         } finally {
+            // A cloud handoff or interrupted stream never owns a persisted bubble.
+            // Clear its temporary preview even when onTextPart was not reached.
+            if (isCurrentGeneration()) {
+                if (streamParseFrameRef.current) {
+                    cancelAnimationFrame(streamParseFrameRef.current);
+                    streamParseFrameRef.current = 0;
+                }
+                streamAccumRef.current = "";
+                setStreamPreview(null);
+            }
             if (finishGenerationRun(session.id, generationRunId)) {
                 isGeneratingRef.current = false;
                 setIsGenerating(false);
@@ -3858,6 +3868,16 @@ export function ChatRoom({ session, onBack, onDeleted }: ChatRoomProps) {
             });
             setMessages(prev => [...prev, errorMsg]);
         } finally {
+            // A cloud handoff or interrupted stream never owns a persisted bubble.
+            // Clear its temporary preview even when onTextPart was not reached.
+            if (isCurrentGeneration()) {
+                if (streamParseFrameRef.current) {
+                    cancelAnimationFrame(streamParseFrameRef.current);
+                    streamParseFrameRef.current = 0;
+                }
+                streamAccumRef.current = "";
+                setStreamPreview(null);
+            }
             if (finishGenerationRun(session.id, generationRunId)) {
                 isGeneratingRef.current = false;
                 setIsGenerating(false);
