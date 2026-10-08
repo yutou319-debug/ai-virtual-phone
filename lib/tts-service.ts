@@ -41,7 +41,7 @@ export async function synthesizeSpeech(
 ): Promise<Blob | null> {
     const provider = voiceConfig.provider;
     const model = voiceConfig.model || (provider === "Minimax" ? "speech-01-turbo" : "tts-1");
-    const speechText = prepareSpeechText(text, provider, model);
+    const speechText = prepareSpeechText(text, provider, model, voiceConfig.autoSpeechExpressions === true);
     if (!speechText || !["Minimax", "OpenAI"].includes(provider)) return null;
     // Include all parameters and credentials to avoid reuse across different voices/accounts.
     const key = JSON.stringify([provider, model, voiceConfig.baseUrl, voiceConfig.apiKey,

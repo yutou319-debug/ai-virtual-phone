@@ -926,6 +926,15 @@ export function VoiceSettings() {
                                             </div>
                                         </div>
 
+                                        {config.provider === "Minimax" && /^speech-2\.8-(hd|turbo)$/.test(config.model || "") && (
+                                            <div className="flex flex-col gap-1">
+                                                <div className="ui-toggle-row">
+                                                    <span className="menu-label font-medium">自动轻笑与叹气</span>
+                                                    <Toggle checked={config.autoSpeechExpressions === true} onChange={(v) => updateConfig(config.id, { autoSpeechExpressions: v })} />
+                                                </div>
+                                                <p className="menu-desc px-1">识别句首的“哈哈”“嘿嘿”“唉”，每段最多一次。聊天文字保持原样。</p>
+                                            </div>
+                                        )}
                                         <div className="ui-toggle-row">
                                             <span className="menu-label font-medium">启用语音合成 (TTS)</span>
                                             <Toggle checked={config.enableTTS} onChange={(v) => updateConfig(config.id, { enableTTS: v })} />

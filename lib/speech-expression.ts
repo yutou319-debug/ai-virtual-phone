@@ -6,13 +6,26 @@ const CUES: Record<string, string> = {
     "breath": "breath", "inhale": "inhale", "exhale": "exhale",
 };
 
-export function prepareSpeechText(text: string, provider: string, model: string): string {
+export function prepareSpeechText(text: string, provider: string, model: string, automatic = false): string {
     const expressive = provider === "Minimax" && /^speech-2\.8-(hd|turbo)$/.test(model);
-    return text.replace(/\[([^\[\]\n]+)\]|【([^【】\n]+)】|\(([^()\n]+)\)|（([^（）\n]+)）/g,
+    let hasExplicitCue = false;
+    const prepared = text.replace(/\[([^\[\]\n]+)\]|【([^【】\n]+)】|\(([^()\n]+)\)|（([^（）\n]+)）/g,
         (whole, square, wideSquare, round, wideRound) => {
             const name = String(square ?? wideSquare ?? round ?? wideRound).trim().toLowerCase();
             if (!Object.prototype.hasOwnProperty.call(CUES, name)) return whole;
+            hasExplicitCue = true;
             const cue = CUES[name];
             return expressive ? `(${cue})` : "";
         }).trim();
+    if (!expressive || !automatic || hasExplicitCue) return prepared;
+    // Conservative local detection, not sentiment inference: only standalone
+    // interjections at sentence boundaries. One cue per utterance, no new API call.
+    let inserted = false;
+    return prepared.replace(/(^|[。！？\n])(\s*)(哈哈+|嘿嘿+|唉)([，。！？…\s]|$)/g,
+        (whole, boundary, space, interjection, punctuation) => {
+            if (inserted) return whole;
+            inserted = true;
+            const cue = interjection === "唉" ? "sighs" : "chuckle";
+            return `${boundary}${space}(${cue})${punctuation}`;
+        });
 }

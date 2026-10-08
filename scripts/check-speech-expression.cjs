@@ -10,6 +10,12 @@ const load = source => import('data:text/javascript;base64,' + Buffer.from(strip
     assert.equal(prepare('[轻笑]你好', 'Minimax', 'speech-02-hd'), '你好');
     assert.equal(prepare('(sighs)你好', 'OpenAI', 'tts-1'), '你好');
     assert.equal(prepare('我轻笑着说你好（只是说明）', 'Minimax', 'speech-2.8-turbo'), '我轻笑着说你好（只是说明）');
+    assert.equal(prepare('哈哈，你来了！', 'Minimax', 'speech-2.8-turbo', true), '(chuckle)，你来了！');
+    assert.equal(prepare('唉，今天好累。哈哈，没事了。', 'Minimax', 'speech-2.8-turbo', true), '(sighs)，今天好累。哈哈，没事了。');
+    assert.equal(prepare('哈哈，你来了！', 'Minimax', 'speech-2.8-turbo'), '哈哈，你来了！');
+    assert.equal(prepare('哈哈，你来了！', 'Minimax', 'speech-02-hd', true), '哈哈，你来了！');
+    assert.equal(prepare('别笑。不要叹气。“哈哈，你来了。”', 'Minimax', 'speech-2.8-turbo', true), '别笑。不要叹气。“哈哈，你来了。”');
+    assert.equal(prepare('【轻笑】哈哈，你来了！', 'Minimax', 'speech-2.8-turbo', true), '(chuckle)哈哈，你来了！');
     const service = fs.readFileSync('lib/tts-service.ts', 'utf8');
     const end = service.indexOf('// ── Audio Playback');
     const isolated = service.slice(0, end < 0 ? service.length : end)
