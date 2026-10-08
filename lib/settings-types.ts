@@ -173,6 +173,8 @@ export type VoiceApiConfig = {
     speechPitch?: number;
     /** Infer a single ordinary laugh/sigh from explicit interjections. Opt-in. */
     autoSpeechExpressions?: boolean;
+    /** Locally mix quiet rain when the current spoken text explicitly describes it. */
+    autoSpeechAmbience?: boolean;
     customVoices?: { id: string; name: string; createdAt?: number }[];
     enableSTT: boolean;
     enableTTS: boolean;

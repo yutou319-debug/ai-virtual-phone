@@ -3,6 +3,7 @@
 import type { VoiceApiConfig, ContentAppId } from "./settings-types";
 import { loadVoiceConfigs, loadBindingConfig, resolveBinding } from "./settings-storage";
 import { prepareSpeechText } from "./speech-expression";
+import { addSpeechAmbience, detectSpeechAmbience } from "./speech-ambience";
 
 export type VoiceApiConfigResolved = VoiceApiConfig;
 
@@ -43,14 +44,18 @@ export async function synthesizeSpeech(
     const model = voiceConfig.model || (provider === "Minimax" ? "speech-01-turbo" : "tts-1");
     const speechText = prepareSpeechText(text, provider, model, voiceConfig.autoSpeechExpressions === true);
     if (!speechText || !["Minimax", "OpenAI"].includes(provider)) return null;
+    const ambience = voiceConfig.autoSpeechAmbience === true ? detectSpeechAmbience(text) : null;
     // Include all parameters and credentials to avoid reuse across different voices/accounts.
     const key = JSON.stringify([provider, model, voiceConfig.baseUrl, voiceConfig.apiKey,
         voiceConfig.defaultVoice, voiceConfig.speechSpeed, voiceConfig.speechPitch,
         voiceConfig.languageBoost, options?.emotion, speechText]);
     const cached = speechAudio.get(key);
-    if (cached) return cached;
+    if (cached) return addSpeechAmbience(cached, ambience);
     const existing = speechRequests.get(key);
-    if (existing) return existing;
+    if (existing) {
+        const speech = await existing;
+        return speech ? addSpeechAmbience(speech, ambience) : null;
+    }
     const task = (async () => {
         const blob = provider === "Minimax"
             ? await synthesizeMinimax(speechText, voiceConfig, options?.emotion)
@@ -67,7 +72,10 @@ export async function synthesizeSpeech(
         return blob;
     })();
     speechRequests.set(key, task);
-    try { return await task; }
+    try {
+        const speech = await task;
+        return speech ? await addSpeechAmbience(speech, ambience) : null;
+    }
     finally { speechRequests.delete(key); }
 }
 

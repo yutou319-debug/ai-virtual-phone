@@ -936,6 +936,11 @@ export function VoiceSettings() {
                                             </div>
                                         )}
                                         <div className="ui-toggle-row">
+                                            <span className="menu-label font-medium">自动背景雨声</span>
+                                            <Toggle checked={config.autoSpeechAmbience === true} onChange={(v) => updateConfig(config.id, { autoSpeechAmbience: v })} />
+                                        </div>
+                                        <p className="menu-desc px-1">台词明确提到正在下雨或听雨声时，加入轻柔的本地雨声，仅随语音播放。</p>
+                                        <div className="ui-toggle-row">
                                             <span className="menu-label font-medium">启用语音合成 (TTS)</span>
                                             <Toggle checked={config.enableTTS} onChange={(v) => updateConfig(config.id, { enableTTS: v })} />
                                         </div>
