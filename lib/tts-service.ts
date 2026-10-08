@@ -2,8 +2,16 @@
 
 import type { VoiceApiConfig, ContentAppId } from "./settings-types";
 import { loadVoiceConfigs, loadBindingConfig, resolveBinding } from "./settings-storage";
+import { prepareSpeechText } from "./speech-expression";
 
 export type VoiceApiConfigResolved = VoiceApiConfig;
+
+// Session-only cache: never writes API keys or audio to browser storage.
+// Voice messages additionally persist their audio in chat-storage.
+const speechRequests = new Map<string, Promise<Blob | null>>();
+const speechAudio = new Map<string, Blob>();
+let speechAudioBytes = 0;
+const MAX_SPEECH_CACHE_BYTES = 16 * 1024 * 1024;
 
 /**
  * Resolve the TTS voice config for a character via the binding cascade.
@@ -31,19 +39,36 @@ export async function synthesizeSpeech(
     voiceConfig: VoiceApiConfig,
     options?: { emotion?: string },
 ): Promise<Blob | null> {
-    if (!text.trim()) return null;
-
     const provider = voiceConfig.provider;
-
-    if (provider === "Minimax") {
-        return synthesizeMinimax(text, voiceConfig, options?.emotion);
-    }
-
-    if (provider === "OpenAI") {
-        return synthesizeOpenAI(text, voiceConfig);
-    }
-
-    return null;
+    const model = voiceConfig.model || (provider === "Minimax" ? "speech-01-turbo" : "tts-1");
+    const speechText = prepareSpeechText(text, provider, model);
+    if (!speechText || !["Minimax", "OpenAI"].includes(provider)) return null;
+    // Include all parameters and credentials to avoid reuse across different voices/accounts.
+    const key = JSON.stringify([provider, model, voiceConfig.baseUrl, voiceConfig.apiKey,
+        voiceConfig.defaultVoice, voiceConfig.speechSpeed, voiceConfig.speechPitch,
+        voiceConfig.languageBoost, options?.emotion, speechText]);
+    const cached = speechAudio.get(key);
+    if (cached) return cached;
+    const existing = speechRequests.get(key);
+    if (existing) return existing;
+    const task = (async () => {
+        const blob = provider === "Minimax"
+            ? await synthesizeMinimax(speechText, voiceConfig, options?.emotion)
+            : await synthesizeOpenAI(speechText, voiceConfig);
+        if (blob && blob.size <= MAX_SPEECH_CACHE_BYTES) {
+            while (speechAudio.size && (speechAudioBytes + blob.size > MAX_SPEECH_CACHE_BYTES || speechAudio.size >= 32)) {
+                const oldest = speechAudio.keys().next().value!;
+                speechAudioBytes -= speechAudio.get(oldest)!.size;
+                speechAudio.delete(oldest);
+            }
+            speechAudio.set(key, blob);
+            speechAudioBytes += blob.size;
+        }
+        return blob;
+    })();
+    speechRequests.set(key, task);
+    try { return await task; }
+    finally { speechRequests.delete(key); }
 }
 
 // A stalled TTS request (TCP connected but no response — cold start, rate-limit
