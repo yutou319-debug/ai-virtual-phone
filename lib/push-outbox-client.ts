@@ -129,7 +129,10 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
                                     {
                                         silent: options?.silent !== false,
                                         responseBatchId,
-                                        createdAt: bridgeMeta.screenChatAssistantAt,
+                                        createdAt: typeof bridgeMeta.screenChatAssistantAt === "string"
+                                            && Number.isFinite(Date.parse(bridgeMeta.screenChatAssistantAt))
+                                            ? bridgeMeta.screenChatAssistantAt
+                                            : entry.created_at,
                                     },
                                 );
                                 if (hasVisible && newCount < 10) scheduleFollowUp(replySessionId, newCount, stateValues);
@@ -248,7 +251,13 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
                         meta.prevCount ?? 0,
                         followUpIndex,
                         existingMessages,
-                        { silent: options?.silent !== false, responseBatchId, ...(shortcutMarker ? { shortcutMarker } : {}) },
+                        {
+                            silent: options?.silent !== false,
+                            responseBatchId,
+                            // 云端落入回传箱的时间才是发送时间；不能使用打开 App 的导入时间。
+                            createdAt: entry.created_at,
+                            ...(shortcutMarker ? { shortcutMarker } : {}),
+                        },
                     );
                     // 已有本地回复时只补回通知原文，不覆盖本地回复的追问排期。
                     if (hasVisible && newCount < 10 && !hasReplyAfterArm) scheduleFollowUp(sessionId, newCount, stateValues);
