@@ -5,6 +5,7 @@
  * Messages are saved to storage; UI is notified via CustomEvent.
  */
 
+import { isCallActiveForSession } from "./call-session-store";
 import {
     loadChatSessions,
     loadChatMessages,
@@ -205,6 +206,7 @@ export function scheduleFollowUp(sessionId: string, count: number, stateValues?:
 }
 
 export async function requestBackgroundChatReply(sessionId: string): Promise<{ ok: boolean; skipped?: string }> {
+    if (isCallActiveForSession(sessionId)) return { ok: false, skipped: "active_call" };
     if (backgroundReplyFiringSet.has(sessionId)) return { ok: false, skipped: "already_running" };
     const session = loadChatSessions().find(s => s.id === sessionId);
     if (!session) return { ok: false, skipped: "missing_session" };
@@ -252,7 +254,10 @@ export function cancelFollowUp(sessionId: string) {
     cancelFollowUpBailout(sessionId);
     // 用户发了消息：冷场重连计数清零，按新周期重挂服务端预约
     const idleRule = resetIdleReconnectForSession(sessionId);
-    if (idleRule) void armIdleReconnectBailout({ ...idleRule, consecutiveCount: 0 });
+    if (idleRule) {
+        if (isCallActiveForSession(sessionId)) void cancelBailoutPrefix(`idle:${idleRule.id}:`);
+        else void armIdleReconnectBailout({ ...idleRule, consecutiveCount: 0 });
+    }
     // If an API call is already in-flight, mark it for cancellation
     if (firingSet.has(sessionId)) {
         cancelledWhileFiring.add(sessionId);
@@ -543,6 +548,7 @@ function pollIdleReconnect(now: number) {
     lastIdleReconnectPollAt = now;
 
     for (const rule of loadIdleReconnectRules()) {
+        if (isCallActiveForSession(rule.sessionId)) continue;
         if (idleReconnectFiringSet.has(rule.id)) continue;
         if (firingSet.has(rule.sessionId)) continue;
         // 追问链正在管这个会话时不叠加打扰

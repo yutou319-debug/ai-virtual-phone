@@ -3,6 +3,7 @@
 // App 被杀则由服务端 cron 到点接管生成并推送。组装用的就是前台同一条
 // buildChatPromptMessages → buildProviderRequest 链路，零新逻辑。
 
+import { isCallActiveForSession } from "./call-session-store";
 import { bgSetInterval } from "./bg-timer";
 import { buildChatPromptMessages } from "./chat-engine";
 import { buildProviderRequest, toLlmRequestMessages, type LlmRequestPayload } from "./llm-provider-adapter";
@@ -483,6 +484,10 @@ function buildQuietWindowMeta(): { startMin: number; endMin: number; tzOffsetMin
 /** 冷场重连兜底：按「用户最后一条消息 + 间隔」预约服务端触发；
  *  服务端触发一次后会自动排下一发（连发上限内），用户回复后客户端重挂新周期。 */
 export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<BailoutArmResult> {
+    if (isCallActiveForSession(rule.sessionId)) {
+        await cancelBailoutPrefix(`idle:${rule.id}:`);
+        return { ok: false, reason: "通话期间暂停冷场重连" };
+    }
     if (!bailoutEnabled()) return { ok: false, reason: "当前环境不支持服务端离线预约" };
     try {
         if (!(await hasAccountPushSubscription())) return { ok: false, reason: "当前账号没有可用的离线推送订阅" };
@@ -532,6 +537,10 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         //（旧连发序号、服务端续排的 "+" 后缀键）。之前是先清后挂，切后台/杀进程
         // 发生在清理和重挂之间会把预约整个删空——服务端从此无单可执行。
         const triggerKey = `idle:${rule.id}:${effectiveConsecutive}`;
+        if (isCallActiveForSession(rule.sessionId)) {
+            await cancelBailoutPrefix(`idle:${rule.id}:`);
+            return { ok: false, reason: "通话期间暂停冷场重连" };
+        }
         const posted = await postBailoutJob({
             triggerKey,
             kind: "timed_task",
@@ -553,6 +562,10 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
                 ...(remaining > 0 ? { idleRepeat: { intervalMs, remaining, quietWin: buildQuietWindowMeta() } } : {}),
             },
         });
+        if (isCallActiveForSession(rule.sessionId)) {
+            await cancelBailoutPrefix(`idle:${rule.id}:`);
+            return { ok: false, reason: "通话期间暂停冷场重连" };
+        }
         if (!posted) return { ok: false, reason: "服务端预约接口没有确认成功" };
         // 清理不阻塞结果：新单已挂稳；旧键偶尔清不掉，下次任一重挂时机会再清
         void cancelBailoutPrefix(`idle:${rule.id}:`, triggerKey);

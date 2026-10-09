@@ -1,6 +1,7 @@
 // lib/chat-engine.ts
 
 import { createSseJsonParser, createSseCompletionTracker } from "./sse-json";
+import { isCallActiveForSession } from "./call-session-store";
 import { maybeAppendShortcutCapability } from "./offline-shortcut-capability";
 import { loadCharacters } from "./character-storage";
 import { buildScreenEffectPromptHint } from "./chat-screen-effects";
@@ -347,6 +348,7 @@ export type DebugPromptRequestOptions = {
 };
 
 type ChatPromptBuildOptions = {
+    callAutoChat?: boolean;
     followUpCount?: number;
     followUpDelay?: number;
     timedWakeElapsedMinutes?: number;
@@ -2493,6 +2495,11 @@ export async function generateChatCompletion(
     options?: ChatPromptBuildOptions & { signal?: AbortSignal },
     callbacks?: ChatCompletionCallbacks,
 ): Promise<ChatCompletionResult> {
+    if (isCallActiveForSession(session.id) && !(options?.appTags ?? []).some(tag => tag === "voice" || tag === "video")) {
+        const error = new Error("该会话正在通话，普通聊天生成已暂停。");
+        error.name = "AbortError";
+        throw error;
+    }
     // 发送兜底（离线推送）：生成期间在服务端挂一张带心跳租约的保险单，
     // 本地完成即撤销；App 被杀则心跳停跳，服务端接管生成并推送。
     const bailoutRef: ReplyBailoutRef = {
@@ -2550,11 +2557,12 @@ async function generateChatCompletionCore(
     bailoutRef: ReplyBailoutRef,
 ): Promise<ChatCompletionResult> {
     const { llmMessages, character, config, preset, regexes, userIdentity, toolsEnabled } = await buildChatPromptMessages(session, history, options);
+    if (options?.callAutoChat) llmMessages.push({ role: "system", content: "你和用户仍在通话，刚刚安静了一会儿。自然地提出一个适合当前上下文的新话题，用简短口语说一两句。不要重复上一段回复，不要虚构用户刚说了话，不要发起新的通话或工具调用。" });
     const requestAppTags = mergeAppTags(options?.appTags, options?.promptProfile?.appTags, options?.appId ?? "chat");
 
     // Ordinary push-enabled replies have one executor: the personal cloud.
     // Queue BEFORE any local API call; uncertainty never falls back to a second call.
-    if (!session.isGroup && (options?.appId ?? "chat") === "chat" && !(requestAppTags ?? []).includes("followup")) {
+    if (!session.isGroup && (options?.appId ?? "chat") === "chat" && !(requestAppTags ?? []).some(tag => ["followup", "voice", "video"].includes(tag))) {
         const replyAfterMessage = [...history].reverse().find(message =>
             message.sessionId === session.id
             && (message.role === "user" || message.mediaType === "system_instruction")

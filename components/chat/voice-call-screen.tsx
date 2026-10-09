@@ -1,6 +1,10 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import { CallTurnQueue } from "@/lib/call-turn-queue";
+import { useCallAutoChat } from "./use-call-auto-chat";
+import { CallMiniWindow } from "./call-mini-window";
+import { CallAutoChatControls } from "./call-auto-chat-controls";
 import { ChatSession, ChatMessage, loadChatMessages, pushChatMessage, getLatestCharacterStateValues } from "@/lib/chat-storage";
 import { getStatusRegionConfig, isCustomStatusRegionActive } from "@/lib/chat-status-region";
 import type { StateValue } from "@/lib/chat-storage";
@@ -45,9 +49,9 @@ type VoiceCallScreenProps = {
     onEnd: () => void;
     onConnect?: () => void;
     initiator?: "user" | "character";
-    /** 通话是否处于缩小的悬浮窗状态：暂停麦克风监听/计时/语音播放，仅显示背景+名字 */
+    /** 通话是否处于缩小的悬浮窗状态：继续监听、计时与语音播放 */
     minimized?: boolean;
-    /** 点击左上角返回键：请求缩小为悬浮窗（通话逻辑冻结，不挂断） */
+    /** 点击左上角返回键：请求缩小为悬浮窗（通话继续，不挂断） */
     onMinimize?: () => void;
     /** 点击悬浮窗：请求恢复为全屏通话界面 */
     onRestore?: () => void;
@@ -76,7 +80,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     const androidTextInputOnly = androidTextInputOnlyRef.current;
     const playCallAudio = iosDevice ? playAudioBlob : playAudioBlobViaMediaElement;
     const keyboardOffsetStyle = useCallKeyboardOffsetStyle();
-    const [callState, setCallState] = useState<CallState>("CONNECTING");
+    const [callState, setCallStateValue] = useState<CallState>("CONNECTING");
     const hasConnectedRef = useRef(false);
     const [callDuration, setCallDuration] = useState(0);
     const [subtitles, setSubtitles] = useState<SubtitleEntry[]>([]);
@@ -91,9 +95,17 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     const audioAbortRef = useRef<(() => void) | null>(null);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
     const callStartRef = useRef<number>(0);
-    const pausedAtRef = useRef<number | null>(null);
-    const minimizedRef = useRef(false);
     const stateRef = useRef<string>("CONNECTING");
+    const setCallState = useCallback((state: CallState) => {
+        stateRef.current = state;
+        setCallStateValue(state);
+    }, []);
+    const [pendingTurns, setPendingTurns] = useState(0);
+    const queueRef = useRef<CallTurnQueue | null>(null);
+    if (!queueRef.current) queueRef.current = new CallTurnQueue(setPendingTurns);
+    const generationAbortRef = useRef<AbortController | null>(null);
+    const turnFailedRef = useRef(false);
+
     const interimTextRef = useRef<string>("");  // ref 版本，闭包安全
     const sttWarningShownRef = useRef(false);
     const subtitleScrollRef = useRef<HTMLDivElement>(null);
@@ -102,17 +114,6 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     const userNameRef = useRef<string>(_initUi?.name || "你");
 
     // Keep refs in sync
-    useEffect(() => { stateRef.current = callState; }, [callState]);
-    useEffect(() => { minimizedRef.current = minimized; }, [minimized]);
-
-    // 缩小为悬浮窗：冻结通话——停止监听、打断在播放的语音
-    useEffect(() => {
-        if (!minimized) return;
-        if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
-        setInterimText("");
-        if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
-        if (window.speechSynthesis) window.speechSynthesis.cancel();
-    }, [minimized]);
 
     // 来电等待接听：循环振动（开关在聊天主页，iOS 网页不支持自动无效果）
     useEffect(() => {
@@ -132,9 +133,13 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     // 恒成立（stateRef 停在 IDLE），会在后台无限自我重启，麦克风永不归还，
     // 整页音频被钉在通话模式（语音条/试听音量巨大且音量键失灵）。
     useEffect(() => {
+        stateRef.current = "CONNECTING";
+        queueRef.current = new CallTurnQueue(setPendingTurns);
         setCallAudioSessionActive(true);
         return () => {
             stateRef.current = "ENDED";
+            queueRef.current?.stop();
+            generationAbortRef.current?.abort();
             if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
             if (audioAbortRef.current) { audioAbortRef.current(); audioAbortRef.current = null; }
             setCallAudioSessionActive(false);
@@ -192,18 +197,6 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             callStartRef.current = Date.now();
         }
 
-        // 缩小为悬浮窗：冻结计时显示，不再推进
-        if (minimized) {
-            if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-            if (pausedAtRef.current === null) pausedAtRef.current = Date.now();
-            return;
-        }
-        // 从悬浮窗恢复：把冻结期间流逝的时间补回起点，避免时长跳变
-        if (pausedAtRef.current !== null) {
-            callStartRef.current += Date.now() - pausedAtRef.current;
-            pausedAtRef.current = null;
-        }
-
         timerRef.current = setInterval(() => {
             setCallDuration(Math.floor((Date.now() - callStartRef.current) / 1000));
         }, 1000);
@@ -211,7 +204,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
         return () => {
             if (timerRef.current) clearInterval(timerRef.current);
         };
-    }, [callState, minimized]);
+    }, [callState]);
 
     // ── Connecting animation (3s fake dial) ─────────
 
@@ -343,7 +336,15 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
 
     // ── Full conversation turn ──────────────────────
 
-    const runConversationTurn = useCallback(async (userText?: string) => {
+    const executeConversationTurn = useCallback(async (userText?: string, automatic = false) => {
+        if (stateRef.current === "ENDED") return;
+        const controller = new AbortController();
+        generationAbortRef.current = controller;
+        // Move synchronously before aborting recognition: abort may fire onEnd.
+        setCallState("PROCESSING");
+        if (sttRef.current) { sttRef.current.abort(); sttRef.current = null; }
+        interimTextRef.current = "";
+        messagesRef.current = loadChatMessages(session.id);
         // 1. Save user message (skip for initial greeting)
         if (userText) {
             const userMsg = pushChatMessage({
@@ -365,6 +366,9 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             // 3. Generate AI response
             const aiResponseText = flattenCompletionResult(await generateChatCompletion(session, messagesRef.current, {
                 appTags: ["chat", "voice"],
+                signal: controller.signal,
+                toolsAllowed: false,
+                callAutoChat: automatic,
             }));
 
             // Bail if call ended during generation
@@ -375,7 +379,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             const displayText = cleanParts.join("\n");
             const speechText = stripBilingualForSpeech(displayText);
 
-            if (!displayText) {
+            if (!displayText) { turnFailedRef.current = true;
                 setCallState("IDLE");
                 return;
             }
@@ -383,12 +387,6 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             // 5. Add AI subtitle
             const subtitleId = `ai-${Date.now()}`;
             setSubtitles(prev => [...prev, { id: subtitleId, role: "assistant", text: displayText }]);
-
-            // 缩小为悬浮窗期间收到的回复：只静默记录文字，不播放语音
-            if (minimizedRef.current) {
-                setCallState("IDLE");
-                return;
-            }
 
             // 6. TTS
             setCallState("AI_SPEAKING");
@@ -406,6 +404,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                         audioAbortRef.current = null;
                     }
                 } catch (e) {
+                    turnFailedRef.current = true;
                     console.warn("[VoiceCall] TTS failed:", e);
                 }
             }
@@ -414,6 +413,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 setCallState("IDLE");
             }
         } catch (error: any) {
+            turnFailedRef.current = true;
             console.error("[VoiceCall] Error:", error);
             if (stateRef.current !== "ENDED") {
                 setSubtitles(prev => [...prev, {
@@ -425,6 +425,14 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             }
         }
     }, [session, processAIResponse, playCallAudio]);
+
+    const runConversationTurn = useCallback(async (userText?: string, automatic = false): Promise<boolean> => {
+        if (stateRef.current === "ENDED" || stateRef.current === "CONNECTING") return false;
+        turnFailedRef.current = false;
+        const accepted = await queueRef.current!.submit(userText, text => executeConversationTurn(text, automatic && !text));
+        return accepted && !turnFailedRef.current;
+    }, [executeConversationTurn]);
+    const autoChat = useCallAutoChat(callState, () => runConversationTurn(undefined, true), pendingTurns);
 
     // ── Auto-listen: 进入 IDLE 自动开始监听 ────────
 
@@ -441,8 +449,10 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
         setInterimText("");
         interimTextRef.current = "";
 
+        let settled = false;
         const stt = createSTTSession({
             onInterim: (text) => {
+                if (settled || !["IDLE", "USER_SPEAKING"].includes(stateRef.current)) return;
                 setInterimText(text);
                 interimTextRef.current = text;
                 // 有中间结果 → 切到 USER_SPEAKING
@@ -451,6 +461,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 }
             },
             onFinal: (text) => {
+                if (settled || !["IDLE", "USER_SPEAKING"].includes(stateRef.current)) return;
+                settled = true;
                 sttRef.current = null;
                 if (text.trim()) {
                     runConversationTurn(text.trim());
@@ -460,6 +472,9 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 }
             },
             onError: (error) => {
+                if (settled) return;
+                settled = true;
+                interimTextRef.current = "";
                 console.warn("[VoiceCall] STT error:", error);
                 sttRef.current = null;
                 setInterimText("");
@@ -470,6 +485,9 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 }
             },
             onNoSpeech: () => {
+                if (settled) return;
+                settled = true;
+                interimTextRef.current = "";
                 // 没检测到语音 → 静默重新开始监听
                 sttRef.current = null;
                 showSttCompatibilityWarning();
@@ -483,6 +501,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                 }
             },
             onEnd: () => {
+                if (settled) return;
+                settled = true;
                 // 没有 finalText 也没有 no-speech → 用 interimRef 兜底
                 sttRef.current = null;
                 if (stateRef.current === "USER_SPEAKING" || stateRef.current === "IDLE") {
@@ -515,10 +535,10 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             sttRef.current = null;
             setInterimText("");
         }
-        if (!androidTextInputOnly && inputMode === "voice" && callState === "IDLE" && !isMuted && !minimized) {
+        if (!androidTextInputOnly && inputMode === "voice" && callState === "IDLE" && !isMuted) {
             // 短暂延迟让 UI 过渡完成
             const timer = setTimeout(() => {
-                if (stateRef.current === "IDLE" && !minimizedRef.current) {
+                if (stateRef.current === "IDLE") {
                     startListening();
                 }
             }, 500);
@@ -529,7 +549,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             sttRef.current.abort();
             sttRef.current = null;
         }
-    }, [androidTextInputOnly, holdToTalk, callState, isMuted, inputMode, minimized, startListening]);
+    }, [androidTextInputOnly, holdToTalk, callState, isMuted, inputMode, startListening]);
 
     const handleInputModeToggle = useCallback(() => {
         if (androidTextInputOnly) {
@@ -557,7 +577,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
 
     const handleTextSubmit = useCallback(() => {
         const text = typedText.trim();
-        if (!text || callState !== "IDLE") return;
+        if (!text || stateRef.current === "ENDED" || stateRef.current === "CONNECTING") return;
+        if (queueRef.current!.isBusy && queueRef.current!.pendingCount >= 5) return;
         if (sttRef.current) {
             sttRef.current.abort();
             sttRef.current = null;
@@ -598,7 +619,10 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     // ── Hangup ──────────────────────────────────────
 
     const handleHangup = useCallback(() => {
+        if (stateRef.current === "ENDED") return;
         setCallState("ENDED");
+        queueRef.current!.stop();
+        generationAbortRef.current?.abort();
 
         // Stop any ongoing STT
         if (sttRef.current) {
@@ -632,19 +656,8 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
     // ── Render ──────────────────────────────────────
 
     if (minimized) {
-        return (
-            <button
-                type="button"
-                className="call-mini-window"
-                style={{ backgroundImage: `url(${bgImageResolved || character.avatar || ""})` }}
-                onClick={onRestore}
-                aria-label={`返回与${character.name}的语音通话`}
-                title="点击返回通话"
-            >
-                <span className="call-mini-window-overlay" />
-                <span className="call-mini-window-name">{character.name}</span>
-            </button>
-        );
+        return <CallMiniWindow name={character.name} image={bgImageResolved || character.avatar || ""}
+            status={`${formatTime(callDuration)} · ${stateLabel()}`} onRestore={onRestore} onEnd={handleHangup} />;
     }
 
     return (
@@ -659,6 +672,7 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
             />
 
             <CallVolumeControl />
+            <CallAutoChatControls options={autoChat} pending={pendingTurns} />
 
             {onMinimize && callState !== "ENDED" && (
                 <button
@@ -785,13 +799,12 @@ export function VoiceCallScreen({ session, character, onEnd, onConnect, initiato
                                 value={typedText}
                                 onChange={e => setTypedText(e.target.value)}
                                 className="call-text-input"
-                                placeholder={callState === "IDLE" ? "输入你想说的话..." : "稍等对方说完..."}
-                                disabled={callState !== "IDLE"}
+                                placeholder={pendingTurns >= 5 ? "队列已满，等一条发完再发送" : callState === "IDLE" ? "输入你想说的话..." : "输入内容，排队发送..."}
                             />
                             <button
                                 type="submit"
                                 className="call-text-send-btn"
-                                disabled={!typedText.trim() || callState !== "IDLE"}
+                                disabled={!typedText.trim() || pendingTurns >= 5}
                                 aria-label="发送"
                             >
                                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round">
