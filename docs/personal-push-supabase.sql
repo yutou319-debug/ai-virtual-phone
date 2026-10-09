@@ -18,7 +18,7 @@ begin
         'ai_phone_cloud_meta',
         'push_server_config', 'push_subscriptions', 'push_jobs', 'push_outbox',
         'push_shortcut_commands', 'push_bridge_config', 'push_bridge_snapshots',
-        'push_screen_sessions', 'push_screen_threads'
+        'push_screen_sessions', 'push_screen_threads', 'push_daily_contact_rules'
       ])
   ) into has_unknown_public_table;
 
@@ -34,7 +34,7 @@ create table if not exists public.ai_phone_cloud_meta (
   updated_at timestamptz not null default now()
 );
 insert into public.ai_phone_cloud_meta (id, schema_version, updated_at)
-values ('personal-cloud', 3, now())
+values ('personal-cloud', 4, now())
 on conflict (id) do update set schema_version = excluded.schema_version, updated_at = excluded.updated_at;
 
 create table if not exists public.push_server_config (
@@ -77,9 +77,50 @@ create table if not exists public.push_jobs (
 );
 alter table public.push_jobs drop constraint if exists push_jobs_kind_check;
 alter table public.push_jobs add constraint push_jobs_kind_check
-  check (kind in ('followup', 'reply_bailout', 'reply_once', 'timed_task', 'bridge_scan', 'shortcut_resume'));
+  check (kind in ('followup', 'reply_bailout', 'reply_once', 'timed_task', 'bridge_scan', 'shortcut_resume', 'daily_random'));
 create unique index if not exists push_jobs_trigger_idx on public.push_jobs (user_id, trigger_key);
 create index if not exists push_jobs_due_idx on public.push_jobs (status, execute_at);
+
+-- Durable recurring rules. Daily jobs remain as an attempt ledger, including failed/cancelled jobs.
+create table if not exists public.push_daily_contact_rules (
+  user_id text not null,
+  id text not null,
+  session_id text not null,
+  character_id text not null,
+  enabled boolean not null default true,
+  minute_slots integer[] not null,
+  payload jsonb not null,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, id),
+  unique (user_id, character_id),
+  check (cardinality(minute_slots) between 0 and 900),
+  check (480 <= all(minute_slots) and 1380 > all(minute_slots))
+);
+
+create or replace function public.ai_phone_materialize_daily_contacts()
+returns void language sql set search_path = public as $function$
+  insert into public.push_jobs (id, user_id, trigger_key, kind, execute_at, payload)
+  select 'job_' || gen_random_uuid()::text, r.user_id,
+         'daily:' || r.id || ':' || d.day::text, 'daily_random',
+         (d.day::timestamp + make_interval(mins => eligible.slots[
+           1 + abs(hashtextextended(r.id || ':' || d.day::text, 0) % cardinality(eligible.slots))::integer
+         ])) at time zone 'Asia/Shanghai', r.payload
+  from public.push_daily_contact_rules r
+  cross join lateral (
+    select ((now() at time zone 'Asia/Shanghai')::date + n) as day
+    from generate_series(0, 1) n
+  ) d
+  cross join lateral (
+    select array_agg(m order by m) as slots
+    from unnest(r.minute_slots) m
+    where (d.day::timestamp + make_interval(mins => m)) at time zone 'Asia/Shanghai' > now() + interval '1 minute'
+  ) eligible
+  where r.enabled and cardinality(eligible.slots) > 0
+  on conflict (user_id, trigger_key) do nothing;
+$function$;
+revoke all on function public.ai_phone_materialize_daily_contacts() from public, anon, authenticated;
+grant execute on function public.ai_phone_materialize_daily_contacts() to service_role;
+revoke all on table public.push_daily_contact_rules from public, anon, authenticated;
 
 create table if not exists public.push_outbox (
   id text primary key,
@@ -294,6 +335,7 @@ alter table public.push_server_config enable row level security;
 alter table public.ai_phone_cloud_meta enable row level security;
 alter table public.push_subscriptions enable row level security;
 alter table public.push_jobs enable row level security;
+alter table public.push_daily_contact_rules enable row level security;
 alter table public.push_outbox enable row level security;
 alter table public.push_shortcut_commands enable row level security;
 alter table public.push_bridge_config enable row level security;
@@ -311,6 +353,7 @@ grant select, insert, update, delete on table
   public.ai_phone_cloud_meta,
   public.push_subscriptions,
   public.push_jobs,
+  public.push_daily_contact_rules,
   public.push_outbox,
   public.push_shortcut_commands,
   public.push_bridge_config,
@@ -336,12 +379,13 @@ select cron.unschedule(jobid)
 -- 相比 10 秒一扫，cron.job_run_details 日志量降到 1/6，数据库更省。
 -- bridge_scan（现实桥收件箱扫描）派给 push-bridge，其余派给 push-generate。
 select cron.schedule('ai-phone-personal-push-jobs-scan', '* * * * *', $CRON$
+  select public.ai_phone_materialize_daily_contacts();
   update public.push_jobs
      set status = 'pending', updated_at = now()
-   where status = 'running' and kind <> 'reply_once' and updated_at < now() - interval '20 minutes';
+   where status = 'running' and kind not in ('reply_once', 'daily_random') and updated_at < now() - interval '20 minutes';
 
   update public.push_jobs set status = 'failed', result_note = 'Cloud execution timed out; not retried to avoid duplicate charges', updated_at = now()
-   where status = 'running' and kind = 'reply_once' and updated_at < now() - interval '20 minutes';
+   where status = 'running' and kind in ('reply_once', 'daily_random') and updated_at < now() - interval '20 minutes';
 
   select net.http_post(
     url     := 'https://__PROJECT_REF__.supabase.co/functions/v1/push-generate',

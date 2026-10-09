@@ -9,7 +9,7 @@ import { buildChatPromptMessages } from "./chat-engine";
 import { buildProviderRequest, toLlmRequestMessages, type LlmRequestPayload } from "./llm-provider-adapter";
 import { loadChatMessages, loadChatSessions, loadFollowUpSchedule, type ChatMessage, type ChatSession } from "./chat-storage";
 import { hasAccountPushSubscription, isWithinPushQuietHours, loadPushQuietHours, peekAccountPushSubscribed } from "./push-client";
-import { isPersonalPushCloudActive, pushJobsFetch } from "./personal-push-cloud";
+import { isPersonalPushCloudActive, personalPushFetch, pushJobsFetch } from "./personal-push-cloud";
 import {
     buildOfflineShortcutContinuation,
     maybeAppendShortcutCapability,
@@ -28,6 +28,7 @@ import {
     loadIdleReconnectRules,
     type IdleReconnectRule,
 } from "./idle-reconnect-storage";
+import { dailyContactMinutes, loadDailyContactRules, type DailyContactRule } from "./daily-contact-storage";
 import { loadCharacters } from "./character-storage";
 import type { RegexConfig } from "./settings-types";
 import type { LLMMessage } from "./llm-prompt-assembler";
@@ -701,6 +702,47 @@ export async function armPeriodCareBailouts(): Promise<void> {
     }
 }
 
+/** Durable cloud rule; no local timer or local model invocation. */
+export async function armDailyContactRule(rule: DailyContactRule, refreshOnly = false): Promise<BailoutArmResult> {
+    if (!bailoutEnabled()) return { ok: false, reason: "请先部署个人 Supabase 离线推送" };
+    try {
+        if (!(await hasAccountPushSubscription())) return { ok: false, reason: "请先开启本设备离线推送" };
+        const minutes = dailyContactMinutes(buildQuietWindowMeta());
+        if (!minutes.length && !refreshOnly) return { ok: false, reason: "安静时段覆盖了全部 08:00–23:00，请调整安静时段" };
+        const session = loadChatSessions().find(item => item.id === rule.sessionId && !item.isGroup && item.contactId === rule.characterId);
+        if (!session) return { ok: false, reason: "找不到对应的单聊会话" };
+        const { llmMessages, character, config, preset, regexes, userIdentity } = await buildChatPromptMessages(
+            session, loadChatMessages(session.id), { appTags: ["chat", "text", "daily_contact"] },
+        );
+        llmMessages.push({ role: "system", content: "这是用户授权的每日主动联系。自然地开启一个简短话题；用户即使多天没有回复也可以关心对方，但不要编造用户的新消息。只发文字，不生成图片，不调用工具、快捷动作或发起通话。" });
+        const request = buildProviderRequest(config, preset, toLlmRequestMessages(llmMessages));
+        // A daily attempt must never create a second paid tool continuation.
+        delete request.body.tools;
+        delete request.body.tool_choice;
+        const response = await personalPushFetch("daily-rules", {
+            method: refreshOnly ? "PATCH" : "POST",
+            body: JSON.stringify({ id: rule.id, characterId: rule.characterId, sessionId: rule.sessionId, minutes: dailyContactMinutes(buildQuietWindowMeta()), payload: {
+                request: { url: request.url, headers: request.headers, body: request.body, providerKind: request.providerKind },
+                notify: { title: character.name, url: "/" },
+                merge: { sessionId: session.id, prevCount: 0, regexes, characterName: character.name,
+                    userName: userIdentity?.name ?? "用户", appId: "chat", appTags: ["chat", "text", "daily_contact"], dailyRuleId: rule.id },
+            } }),
+        });
+        const data = await response.json().catch(() => null) as { ok?: boolean; error?: string } | null;
+        return response.ok && data?.ok ? { ok: true } : { ok: false, reason: data?.error || "请发布新版网页后重新部署离线推送云函数" };
+    } catch (error) {
+        return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+}
+
+export async function cancelDailyContactRule(rule: DailyContactRule): Promise<BailoutArmResult> {
+    try {
+        const response = await personalPushFetch("daily-rules", { method: "DELETE", body: JSON.stringify({ id: rule.id }) });
+        const data = await response.json().catch(() => null) as { ok?: boolean; error?: string } | null;
+        return response.ok && data?.ok ? { ok: true } : { ok: false, reason: data?.error || "云端未确认删除，请重试" };
+    } catch (error) { return { ok: false, reason: error instanceof Error ? error.message : String(error) }; }
+}
+
 let refreshingScheduled = false;
 
 /** 刷新所有"已知触发时刻"的兜底快照（切后台/启动时调用，保证上下文最新）。 */
@@ -713,6 +755,9 @@ export async function refreshScheduledBailouts(): Promise<void> {
         }
         for (const rule of loadIdleReconnectRules()) {
             await armIdleReconnectBailout(rule);
+        }
+        for (const rule of loadDailyContactRules()) {
+            await armDailyContactRule(rule, true);
         }
         await armPeriodCareBailouts();
     } finally {

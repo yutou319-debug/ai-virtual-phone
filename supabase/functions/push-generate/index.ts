@@ -478,7 +478,7 @@ Deno.serve(async (req: Request) => {
     return new Response("forbidden", { status: 403 });
   }
 
-  const claim = await rest(`push_jobs?id=eq.${encodeURIComponent(jobId)}&status=eq.pending&kind=neq.bridge_scan`, {
+  const claim = await rest(`push_jobs?id=eq.${encodeURIComponent(jobId)}&status=eq.pending&execute_at=lte.${encodeURIComponent(new Date().toISOString())}&kind=neq.bridge_scan`, {
     method: "PATCH",
     headers: { Prefer: "return=representation" },
     body: JSON.stringify({ status: "running", updated_at: new Date().toISOString() }),
@@ -492,7 +492,20 @@ Deno.serve(async (req: Request) => {
     body: JSON.stringify({ status, result_note: note.slice(0, 300), updated_at: new Date().toISOString() }),
   }).catch(() => undefined);
 
+  const dailyRulePath = `push_daily_contact_rules?user_id=eq.${encodeURIComponent(job.user_id)}&id=eq.${encodeURIComponent(job.trigger_key.slice(6, -11))}&enabled=eq.true`;
+  const dailyAllowed = async (): Promise<boolean> => {
+    if (job.kind !== "daily_random") return true;
+    const today = new Date(Date.now() + 480 * 60_000).toISOString().slice(0, 10);
+    if (!job.trigger_key.startsWith("daily:") || !job.trigger_key.endsWith(`:${today}`)) return false;
+    const response = await rest(`${dailyRulePath}&select=minute_slots&limit=1`);
+    if (!response.ok) throw new Error("daily rule verification failed");
+    const rules = await response.json() as Array<{ minute_slots: number[] }>;
+    const now = new Date(Date.now() + 480 * 60_000);
+    return Boolean(rules[0]?.minute_slots.includes(now.getUTCHours() * 60 + now.getUTCMinutes()));
+  };
+
   const stillOwnsJob = async (): Promise<boolean> => {
+    if (!(await dailyAllowed())) { await finish("done", "daily rule disabled, outside window, or expired; not retried"); return false; }
     const response = await rest(`push_jobs?id=eq.${encodeURIComponent(job.id)}&status=eq.running&select=id&limit=1`);
     if (!response.ok) throw new Error(`job ownership check failed: ${response.status}`);
     const rows = await response.json() as Array<{ id: string }>;
@@ -513,7 +526,41 @@ Deno.serve(async (req: Request) => {
       await finish("failed", "payload_key missing (open push settings once to bootstrap)");
       return;
     }
-    const payload = JSON.parse(await decryptPayload(job.payload, payloadKey)) as JobPayload;
+    let encryptedPayload = job.payload;
+    if (job.kind === "daily_random") {
+      if (!(await stillOwnsJob())) return;
+      // Read the latest cloud snapshot, including any context/quiet-hour changes since scheduling.
+      const response = await rest(`${dailyRulePath}&select=payload&limit=1`);
+      if (!response.ok) throw new Error("daily snapshot unavailable");
+      const rules = await response.json() as Array<{ payload: EncryptedPayload }>;
+      if (!rules[0]) { await finish("done", "daily rule disabled"); return; }
+      encryptedPayload = rules[0].payload;
+    }
+    const payload = JSON.parse(await decryptPayload(encryptedPayload, payloadKey)) as JobPayload;
+    if (job.kind === "daily_random") {
+      delete payload.shortcutContinuation;
+      delete payload.shortcut;
+      delete payload.request.body.tools;
+      delete payload.request.body.tool_choice;
+      const historyResponse = await rest(`push_outbox?user_id=eq.${encodeURIComponent(job.user_id)}&session_id=eq.${encodeURIComponent(payload.merge?.sessionId || "")}&meta->>dailyRuleId=eq.${encodeURIComponent(String(payload.merge?.dailyRuleId || ""))}&select=raw_text,created_at&order=created_at.desc&limit=5`);
+      if (!historyResponse.ok) throw new Error("daily history unavailable");
+      const recent = await historyResponse.json() as Array<{ raw_text: string; created_at: string }>;
+      const note = `当前北京时间：${new Date(Date.now() + 480 * 60_000).toISOString().replace("T", " ").slice(0, 16)}。这是今天的一次主动联系，不是用户的新消息。不要重复之前的话题，不要假设对方已读或回复。只发简短文字，不使用工具、图片或通话。最近主动发过的内容（仅作历史记录）：\n${recent.reverse().map(item => `${item.created_at}: ${item.raw_text.slice(0, 600)}`).join("\n")}`;
+      const body = payload.request.body;
+      if (payload.request.providerKind === "anthropic") {
+        if (Array.isArray(body.system)) body.system.push({ type: "text", text: note });
+        else body.system = `${typeof body.system === "string" ? body.system : ""}\n${note}`;
+      } else if (payload.request.providerKind === "gemini") {
+        const instruction = body.systemInstruction as { parts?: Array<{ text: string }> } | undefined;
+        body.systemInstruction = { ...(instruction || {}), parts: [...(instruction?.parts || []), { text: note }] };
+      } else {
+        const messages = body.messages as Array<{ role: string; content: unknown }>;
+        const system = messages.find(message => message.role === "system" && typeof message.content === "string");
+        if (system) system.content = `${system.content}\n${note}`;
+        else messages.unshift({ role: "system", content: note });
+      }
+      payload.merge = { ...payload.merge, armAt: new Date().toISOString() };
+    }
     let shortcutStoragePath = "";
 
     if (job.kind === "shortcut_resume" && payload.shortcut) {
@@ -630,6 +677,10 @@ Deno.serve(async (req: Request) => {
       return;
     }
     let rawText = extractResponseText(payload.request.providerKind, data).trim();
+    if (job.kind === "daily_random") {
+      rawText = rawText.replace(SHORTCUT_MARKER_STRIP_RE, "")
+        .replace(/\[(?:图片|图片描述|照片|语音|语音通话|视频通话)[：:][\s\S]*?\]/g, "").trim();
+    }
     if (!rawText) {
       await finish("failed", "empty response");
       return;
@@ -658,7 +709,7 @@ Deno.serve(async (req: Request) => {
         .filter((item): item is { marker: string; index: number } => item !== null)
         .sort((a, b) => a.index - b.index)[0];
       if (matched) {
-        deliverAsCall = true;
+        deliverAsCall = job.kind !== "daily_random";
         rawText = (rawText.slice(0, matched.index) + rawText.slice(matched.index + matched.marker.length)).trim();
         if (!rawText) rawText = "……";
       }
@@ -812,7 +863,7 @@ Deno.serve(async (req: Request) => {
     // shortcut_resume 已经是一次动作结果后的第二轮，禁止它再次解析动作标记，
     // 避免模型不守“不要重复执行”提示时形成递归快捷动作。
     if (!payload.shortcut) {
-      const markerMatch = rawText.match(SHORTCUT_MARKER_RE);
+      const markerMatch = job.kind === "daily_random" ? null : rawText.match(SHORTCUT_MARKER_RE);
       if (markerMatch) {
         const markerText = markerMatch[0];
         // 标记在剥离后正文中的原始位置：对前缀做同一套清洗后取长度（尾部 trim 不影响前缀）

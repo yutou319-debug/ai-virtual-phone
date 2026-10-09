@@ -28,7 +28,8 @@ import { requestNotificationPermission } from "@/lib/browser-notification";
 import { disableOfflinePush, enableOfflinePush, getOfflinePushState, isShellEnvironment, loadPushQuietHours, savePushQuietHours, sendTestOfflinePush, type OfflinePushState } from "@/lib/push-client";
 import { isPersonalPushCloudActive, setPersonalPushCloudScheduled } from "@/lib/personal-push-cloud";
 import { loadPushCloudScheduled, savePushCloudScheduled } from "@/lib/cloud-deploy-status";
-import { armIdleReconnectBailout, armTimedWakeBailout, cancelBailoutKey, cancelBailoutPrefix } from "@/lib/push-bailout-client";
+import { armDailyContactRule, cancelDailyContactRule, armIdleReconnectBailout, armTimedWakeBailout, cancelBailoutKey, cancelBailoutPrefix } from "@/lib/push-bailout-client";
+import { loadDailyContactRules, saveDailyContactRule, removeDailyContactRule, type DailyContactRule } from "@/lib/daily-contact-storage";
 import { loadTimedWakeSchedules, makeTimedWakeId, removeTimedWakeSchedule, saveTimedWakeSchedule, type TimedWakeSchedule } from "@/lib/timed-wake-storage";
 import { IDLE_RECONNECT_MAX_CONSECUTIVE, loadIdleReconnectRules, removeIdleReconnectRule, upsertIdleReconnectRule, type IdleReconnectRule } from "@/lib/idle-reconnect-storage";
 import { addChatContact, createOrGetSession } from "@/lib/chat-storage";
@@ -1201,7 +1202,8 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
     const [quietEnd, setQuietEnd] = useState(storedQuiet ? `${storedQuiet[3].padStart(2, "0")}:${storedQuiet[4]}` : "08:00");
     const [timedSchedules, setTimedSchedules] = useState<TimedWakeSchedule[]>([]);
     const [idleRules, setIdleRules] = useState<IdleReconnectRule[]>([]);
-    const [tmMode, setTmMode] = useState<"idle" | "once">("idle");
+    const [tmMode, setTmMode] = useState<"idle" | "once" | "daily">("idle");
+    const [dailyRules, setDailyRules] = useState<DailyContactRule[]>([]);
     const [tmCharId, setTmCharId] = useState("");
     const [tmValue, setTmValue] = useState("60");
     const [tmUnit, setTmUnit] = useState<"minute" | "hour" | "day">("minute");
@@ -1211,6 +1213,7 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
     const [tmBusy, setTmBusy] = useState(false);
 
     const refreshTimedSchedules = () => {
+        setDailyRules(loadDailyContactRules());
         setTimedSchedules(loadTimedWakeSchedules().slice().sort((a, b) => a.fireAt - b.fireAt));
         setIdleRules(loadIdleReconnectRules().slice().sort((a, b) => a.createdAt - b.createdAt));
     };
@@ -1260,10 +1263,42 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
 
     const persistQuietHours = (enabled: boolean, start: string, end: string) => {
         savePushQuietHours(enabled && start && end ? `${start}-${end}` : "");
+        // The rule survives offline; explicitly publish quiet-hour changes to the cloud.
+        void (async () => {
+            for (const rule of loadDailyContactRules()) {
+                const result = await armDailyContactRule(rule, true);
+                if (!result.ok) setTmHint(`安静时段已保存到手机，但每日云端规则未更新：${result.reason}`);
+            }
+        })();
     };
 
     const UNIT_MS = { minute: 60_000, hour: 3_600_000, day: 86_400_000 } as const;
     const UNIT_LABEL = { minute: "分钟", hour: "小时", day: "天" } as const;
+
+    const handleCreateDailyRule = async () => {
+        if (tmBusy) return;
+        if (!tmCharId) { setTmHint("请选择角色。"); return; }
+        addChatContact(tmCharId);
+        const session = createOrGetSession(tmCharId);
+        const rule: DailyContactRule = { id: `daily_${tmCharId}`, sessionId: session.id, characterId: tmCharId, createdAt: Date.now() };
+        setTmBusy(true);
+        setTmHint("正在保存每日云端规则...");
+        const result = await armDailyContactRule(rule);
+        if (result.ok) saveDailyContactRule(rule);
+        setTmBusy(false);
+        setTmHint(result.ok ? "已启用每天随机联系：北京时间 08:00–23:00，避开安静时段；每天最多生成一次，几天不开 Float 也继续排期。" : `未启用：${result.reason}`);
+        refreshTimedSchedules();
+    };
+
+    const handleDeleteDailyRule = async (rule: DailyContactRule) => {
+        if (tmBusy) return;
+        setTmBusy(true);
+        const result = await cancelDailyContactRule(rule);
+        if (result.ok) removeDailyContactRule(rule.id);
+        setTmBusy(false);
+        setTmHint(result.ok ? "每日联系已关闭，尚未执行的任务已取消。" : `删除未确认：${result.reason}。请重试。`);
+        refreshTimedSchedules();
+    };
 
     const handleCreateIdleRule = async () => {
         if (tmBusy) return;
@@ -1472,8 +1507,9 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
                             <select
                                 className="text-right border-none outline-none ts-13 text-[var(--c-text)] bg-transparent"
                                 value={tmMode}
-                                onChange={e => setTmMode(e.target.value as "idle" | "once")}
+                                onChange={e => setTmMode(e.target.value as "idle" | "once" | "daily")}
                             >
+                                <option value="daily">每天随机联系（云端持续）</option>
                                 <option value="idle">长时间没消息时（可重复）</option>
                                 <option value="once">固定时间后（一次）</option>
                             </select>
@@ -1497,7 +1533,7 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
                             </select>
                         </div>
                     </div>
-                    {tmMode === "once" ? (
+                    {tmMode === "daily" ? (<div className="menu-item"><span className="menu-label">每天最多一次</span><span className="menu-desc">北京时间 08:00–23:00，避开安静时段</span></div>) : tmMode === "once" ? (
                         <div className="menu-item">
                             <ProfileSettingsIcon icon={Clock} color={BINDING_ACCENTS.voice} />
                             <div className="menu-label-group">
@@ -1549,21 +1585,30 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
                         </div>
                     )}
                     <div className="menu-item" style={{ alignItems: "stretch", flexDirection: "column", gap: 8 }}>
-                        <button className="ui-btn ui-btn-soft-action w-full" onClick={tmMode === "idle" ? handleCreateIdleRule : handleCreateTimedMsg} disabled={tmBusy}>
+                        <button className="ui-btn ui-btn-soft-action w-full" onClick={tmMode === "daily" ? handleCreateDailyRule : tmMode === "idle" ? handleCreateIdleRule : handleCreateTimedMsg} disabled={tmBusy}>
                             {tmBusy ? "创建中..." : "创建"}
                         </button>
                     </div>
                 </div>
                 <p className="menu-group-desc mx-2">
-                    {tmHint || (tmMode === "idle"
+                    {tmHint || (tmMode === "daily" ? "由你的 Supabase 每天排期，不需要打开 Float 或回复。每个角色每天最多一次生成请求；失败不自动重试，第二天照常排期。会消耗模型额度。旧的沉默规则会独立运行，不需要时请删除。" : tmMode === "idle"
                         ? `你长时间不发消息时 TA 会主动来找你；不回复最多连发 ${IDLE_RECONNECT_MAX_CONSECUTIVE} 次，回复后重新开始计。每个角色一条规则。`
                         : "每个角色同时仅保留一条，新建会替换旧的。关掉后台由服务端接管生成并推送（需开启离线推送）。")}
                 </p>
 
-                {(timedSchedules.length > 0 || idleRules.length > 0) && (
+                {(timedSchedules.length > 0 || idleRules.length > 0 || dailyRules.length > 0) && (
                     <>
                         <p className="menu-group-desc mx-2">已排期</p>
                         <div className="menu-group">
+                            {dailyRules.map(rule => (
+                                <div key={rule.id} className="menu-item">
+                                    <div className="menu-label-group" style={{ minWidth: 0, flex: 1 }}>
+                                        <span className="menu-label">{loadCharacters().find(c => c.id === rule.characterId)?.name ?? "未知角色"} · 每天随机联系</span>
+                                        <span className="menu-desc">每天最多一次 · 北京时间 08:00–23:00 · 云端持续排期</span>
+                                    </div>
+                                    <button className="ui-btn ui-btn-outline py-1 px-3 ts-12" style={{ color: "var(--c-danger)" }} disabled={tmBusy} onClick={() => void handleDeleteDailyRule(rule)}>删除</button>
+                                </div>
+                            ))}
                             {idleRules.map(rule => {
                                 const charName = loadCharacters().find(c => c.id === rule.characterId)?.name ?? "未知角色";
                                 const hours = Math.floor(rule.intervalMinutes / 60);

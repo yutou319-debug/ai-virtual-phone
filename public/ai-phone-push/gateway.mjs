@@ -564,7 +564,7 @@ Deno.serve(async (request: Request) => {
         service: "ai-phone-personal-push",
         version: 2,
         schemaVersion,
-        capabilities: schemaVersion >= 3 ? ["screen-chat-continuous"] : [],
+        capabilities: [...(schemaVersion >= 3 ? ["screen-chat-continuous"] : []), ...(schemaVersion >= 4 ? ["daily-random-contact"] : [])],
       });
     }
 
@@ -612,6 +612,61 @@ Deno.serve(async (request: Request) => {
         ));
         return json({ ok: true });
       }
+    }
+
+    if (action === "daily-rules") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const id = cleanText(body.id, 150);
+      if (!/^[a-zA-Z0-9_-]{1,150}$/.test(id)) return json({ ok: false, error: "每日规则标识无效。" }, 400);
+      const rulePath = `push_daily_contact_rules?user_id=eq.${OWNER_ID}&id=eq.${encodeURIComponent(id)}`;
+      if (request.method === "DELETE") {
+        // Keep the disabled tombstone; a stale background refresh cannot resurrect it.
+        await readJson(await rest(rulePath, { method: "PATCH", headers: { Prefer: "return=representation" },
+          body: JSON.stringify({ enabled: false, updated_at: new Date().toISOString() }) }));
+        // Future jobs cannot have called the model (claim requires execute_at <= now).
+        // Remove them so explicitly re-enabling tomorrow does not lose tomorrow's contact.
+        await readJson(await rest(`push_jobs?user_id=eq.${OWNER_ID}&trigger_key=like.${encodeURIComponent(`daily:${id}:*`)}&status=eq.pending&execute_at=gt.${encodeURIComponent(new Date().toISOString())}`, {
+          method: "DELETE", headers: { Prefer: "return=representation" },
+        }));
+        await readJson(await rest(`push_jobs?user_id=eq.${OWNER_ID}&trigger_key=like.${encodeURIComponent(`daily:${id}:*`)}&status=in.(pending,running)`, {
+          method: "PATCH", headers: { Prefer: "return=representation" },
+          body: JSON.stringify({ status: "cancelled", updated_at: new Date().toISOString() }),
+        }));
+        return json({ ok: true });
+      }
+      if (request.method !== "POST" && request.method !== "PATCH") return json({ ok: false }, 405);
+      const sessionId = cleanText(body.sessionId, 150);
+      const characterId = cleanText(body.characterId, 144);
+      const minutes = Array.isArray(body.minutes) ? [...new Set(body.minutes)].filter(m => Number.isInteger(m) && Number(m) >= 480 && Number(m) < 1380) : [];
+      if (id !== `daily_${characterId}` || !sessionId || (!minutes.length && request.method === "POST") || minutes.length > 900 || !body.payload || typeof body.payload !== "object") {
+        return json({ ok: false, error: "每日规则参数不完整。" }, 400);
+      }
+      const payload = body.payload as Record<string, unknown>;
+      payload.merge = { ...(typeof payload.merge === "object" && payload.merge ? payload.merge : {}), sessionId, dailyRuleId: id };
+      delete payload.shortcutContinuation;
+      delete payload.shortcut;
+      const plainJson = JSON.stringify(payload);
+      if (plainJson.length > MAX_PAYLOAD_BYTES) return json({ ok: false, error: "快照过大。" }, 413);
+      const config = await loadConfig();
+      if (!config.payload_key) throw new Error("每日规则加密密钥未初始化。");
+      const encrypted = await encryptPayload(plainJson, config.payload_key);
+      const record = { user_id: OWNER_ID, id, session_id: sessionId, character_id: characterId, minute_slots: minutes, payload: encrypted, updated_at: new Date().toISOString() };
+      if (request.method === "POST") {
+        await readJson(await rest("push_daily_contact_rules?on_conflict=user_id,id", {
+          method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+          body: JSON.stringify([{ ...record, enabled: true }]),
+        }));
+      } else {
+        const updated = await readJson<unknown[]>(await rest(`${rulePath}&enabled=eq.true`, {
+          method: "PATCH", headers: { Prefer: "return=representation" }, body: JSON.stringify(record),
+        }));
+        if (!updated.length) return json({ ok: false, error: "云端规则已关闭，请重新创建。" }, 409);
+      }
+      await readJson(await rest(`push_jobs?user_id=eq.${OWNER_ID}&trigger_key=like.${encodeURIComponent(`daily:${id}:*`)}&status=eq.pending`, {
+        method: "PATCH", headers: { Prefer: "return=representation" }, body: JSON.stringify({ payload: encrypted }),
+      }));
+      await readJson(await rest("rpc/ai_phone_materialize_daily_contacts", { method: "POST", body: "{}" }));
+      return json({ ok: true });
     }
 
     if (action === "jobs") {
