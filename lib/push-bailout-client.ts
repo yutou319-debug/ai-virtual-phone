@@ -14,6 +14,7 @@ import {
     buildOfflineShortcutContinuation,
     maybeAppendShortcutCapability,
     maybeAppendWeixinChannel,
+    offlineWeixinBotIdFor,
     type OfflineShortcutContinuation,
 } from "./offline-shortcut-capability";
 import {
@@ -714,6 +715,9 @@ export async function armDailyContactRule(rule: DailyContactRule, refreshOnly = 
         const { llmMessages, character, config, preset, regexes, userIdentity } = await buildChatPromptMessages(
             session, loadChatMessages(session.id), { appTags: ["chat", "text", "daily_contact"] },
         );
+        // Daily contact uses the already paired cloud bot deterministically. Do not ask the
+        // model to choose a channel or generate a second reply for WeChat.
+        const weixinBotId = offlineWeixinBotIdFor(rule.characterId);
         llmMessages.push({ role: "system", content: "这是用户授权的每日主动联系。自然地开启一个简短话题；用户即使多天没有回复也可以关心对方，但不要编造用户的新消息。只发文字，不生成图片，不调用工具、快捷动作或发起通话。" });
         const request = buildProviderRequest(config, preset, toLlmRequestMessages(llmMessages));
         // A daily attempt must never create a second paid tool continuation.
@@ -724,6 +728,7 @@ export async function armDailyContactRule(rule: DailyContactRule, refreshOnly = 
             body: JSON.stringify({ id: rule.id, characterId: rule.characterId, sessionId: rule.sessionId, minutes: dailyContactMinutes(buildQuietWindowMeta()), payload: {
                 request: { url: request.url, headers: request.headers, body: request.body, providerKind: request.providerKind },
                 notify: { title: character.name, url: "/" },
+                ...(weixinBotId ? { weixin: { botId: weixinBotId, force: true } } : {}),
                 merge: { sessionId: session.id, prevCount: 0, regexes, characterName: character.name,
                     userName: userIdentity?.name ?? "用户", appId: "chat", appTags: ["chat", "text", "daily_contact"], dailyRuleId: rule.id },
             } }),
