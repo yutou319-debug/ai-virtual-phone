@@ -229,11 +229,12 @@ Deno.serve(async (req) => {
     const bucketSendFn = bucketCore && typeof bucketCore.sendProactiveText === "function"
       ? bucketCore.sendProactiveText
       : null;
-    const sendFn = bucketSendFn && (!replyAnchor.localMessageId || bucketSendFn.length >= 4)
+    const mirrorOnly = body?.mirrorOnly === true;
+    const sendFn = bucketSendFn && (mirrorOnly ? bucketSendFn.length >= 5 : (!replyAnchor.localMessageId || bucketSendFn.length >= 4))
       ? bucketSendFn
       : sendProactiveText;
     try {
-      const result = await sendFn(env, botId, text, replyAnchor);
+      const result = await sendFn(env, botId, text, replyAnchor, { mirrorOnly });
       return cloudJsonResponse(200, { ok: true, ...result });
     } catch (err) {
       return cloudJsonResponse(500, { ok: false, error: errorMessage(err) });

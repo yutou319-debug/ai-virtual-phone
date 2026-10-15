@@ -13,7 +13,6 @@ import { isPersonalPushCloudActive, personalPushFetch, pushJobsFetch } from "./p
 import {
     buildOfflineShortcutContinuation,
     maybeAppendShortcutCapability,
-    maybeAppendWeixinChannel,
     offlineWeixinBotIdFor,
     type OfflineShortcutContinuation,
 } from "./offline-shortcut-capability";
@@ -369,6 +368,7 @@ export async function armFollowUpBailout(
         // 但标记式快捷动作云端是支持的（push-generate 解析【快捷动作：名称】），
         // 所以照常注入动作目录，别让角色在离线追问里以为自己什么都做不了。
         maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
+        const weixinBotId = offlineWeixinBotIdFor(session.contactId);
         const request = buildProviderRequest(config, preset, toLlmRequestMessages(llmMessages));
         const shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
             const req = buildProviderRequest(config, preset, toLlmRequestMessages(messages));
@@ -394,6 +394,7 @@ export async function armFollowUpBailout(
                         providerKind: request.providerKind,
                     },
                     notify: { title: character.name, url: "/" },
+                    ...(weixinBotId ? { weixin: { botId: weixinBotId, force: true } } : {}),
                     ...(shortcutContinuation ? { shortcutContinuation } : {}),
                     merge: {
                         sessionId,
@@ -440,7 +441,7 @@ async function postBailoutJob(input: {
                     providerKind: input.request.providerKind,
                 },
                 notify: { title: input.notifyTitle, url: "/" },
-                ...(input.weixinBotId ? { weixin: { botId: input.weixinBotId } } : {}),
+                ...(input.weixinBotId ? { weixin: { botId: input.weixinBotId, force: true } } : {}),
                 ...(input.shortcutContinuation ? { shortcutContinuation: input.shortcutContinuation } : {}),
                 merge: input.merge,
             },
@@ -528,7 +529,7 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         );
         maybeAppendCallInvite(llmMessages, rule.characterId);
         maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
-        const weixinBotId = maybeAppendWeixinChannel(llmMessages, rule.characterId);
+        const weixinBotId = offlineWeixinBotIdFor(rule.characterId);
         const request = buildProviderRequest(config, preset, toLlmRequestMessages(llmMessages));
         const shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
             const req = buildProviderRequest(config, preset, toLlmRequestMessages(messages));
@@ -602,7 +603,7 @@ export async function armTimedWakeBailout(schedule: TimedWakeSchedule): Promise<
         );
         maybeAppendCallInvite(llmMessages, schedule.characterId);
         maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
-        const weixinBotId = maybeAppendWeixinChannel(llmMessages, schedule.characterId);
+        const weixinBotId = offlineWeixinBotIdFor(schedule.characterId);
         const request = buildProviderRequest(config, preset, toLlmRequestMessages(llmMessages));
         const shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
             const req = buildProviderRequest(config, preset, toLlmRequestMessages(messages));
@@ -671,6 +672,7 @@ export async function armPeriodCareBailouts(): Promise<void> {
                     { appTags: ["chat", "text", "period_care"], periodCareContext: event.context },
                 );
                 maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
+                const weixinBotId = offlineWeixinBotIdFor(session.contactId);
                 const request = buildProviderRequest(apiConfig, preset, toLlmRequestMessages(llmMessages));
                 const shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
                     const req = buildProviderRequest(apiConfig, preset, toLlmRequestMessages(messages));
@@ -682,6 +684,7 @@ export async function armPeriodCareBailouts(): Promise<void> {
                     executeAtMs,
                     request,
                     notifyTitle: characterName,
+                    weixinBotId,
                     shortcutContinuation,
                     merge: {
                         sessionId: session.id,
