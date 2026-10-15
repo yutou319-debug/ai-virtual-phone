@@ -1,3 +1,5 @@
+import { listVisualAnnotations } from "./visual-memory-storage";
+import { visualAnnotationPrompt } from "./visual-memory-prompt";
 // lib/chat-engine.ts
 
 import { createSseJsonParser, createSseCompletionTracker } from "./sse-json";
@@ -43,6 +45,7 @@ import {
     buildProviderRequest,
     debugMessagesFromRequest,
     nativeToolProtocolForConfig,
+    providerKindForConfig,
     parseProviderResponse,
     parseProviderStreamDelta,
     stripHallucinatedTimestamps,
@@ -150,11 +153,11 @@ function dataUrlToBlob(dataUrl: string): Blob | null {
     }
 }
 
-export async function readCompressedImageDataUrl(blob: Blob): Promise<string> {
-    return (await rasterizeImageBlobToJpegDataUrl(blob)) ?? blobToDataUrl(blob);
+export async function readCompressedImageDataUrl(blob: Blob, maxSide = LLM_IMAGE_MAX_SIDE): Promise<string> {
+    return (await rasterizeImageBlobToJpegDataUrl(blob, maxSide)) ?? blobToDataUrl(blob);
 }
 
-async function rasterizeImageBlobToJpegDataUrl(blob: Blob): Promise<string | null> {
+async function rasterizeImageBlobToJpegDataUrl(blob: Blob, maxSide = LLM_IMAGE_MAX_SIDE): Promise<string | null> {
     if (typeof document === "undefined" || typeof Image === "undefined") {
         return null;
     }
@@ -165,7 +168,7 @@ async function rasterizeImageBlobToJpegDataUrl(blob: Blob): Promise<string | nul
         const sourceHeight = image.naturalHeight || image.height;
         if (!sourceWidth || !sourceHeight) return null;
 
-        const scale = Math.min(1, LLM_IMAGE_MAX_SIDE / Math.max(sourceWidth, sourceHeight));
+        const scale = Math.min(1, maxSide / Math.max(sourceWidth, sourceHeight));
         const width = Math.max(1, Math.round(sourceWidth * scale));
         const height = Math.max(1, Math.round(sourceHeight * scale));
         const canvas = document.createElement("canvas");
@@ -207,7 +210,7 @@ function isLikelyGifImageRef(imageRef: string): boolean {
 async function fetchRemoteImageBlob(url: string): Promise<Blob | null> {
     if (typeof fetch === "undefined") return null;
     try {
-        const response = await fetch(url);
+        const response = await fetch(url, { credentials: "omit", signal: AbortSignal.timeout(15_000) });
         if (!response.ok) return null;
         return response.blob();
     } catch {
@@ -229,28 +232,29 @@ export async function resolveCompressedImageDataUrl(imageRef: string): Promise<s
 
 type VisionImageResolveResult =
     | { url: string }
-    | { drop: true }
-    | { keep: true };
+    | { drop: true };
 
-async function resolveVisionImageRefForApi(imageRef: string): Promise<VisionImageResolveResult> {
+async function resolveVisionImageRefForApi(imageRef: string, requireInline = false, maxSide = LLM_IMAGE_MAX_SIDE): Promise<VisionImageResolveResult> {
     if (isMediaStoreRef(imageRef)) {
         const result = await loadMediaBlob(imageRef);
-        if (!result) return { keep: true };
+        if (!result) throw new ChatEngineError("图片文件已丢失，无法交给模型。请重新发送图片，或减少传入最近图片数。");
         if (isGifMimeType(result.mimeType) || isGifMimeType(result.blob.type)) {
-            const staticDataUrl = await rasterizeImageBlobToJpegDataUrl(result.blob);
-            return staticDataUrl ? { url: staticDataUrl } : { drop: true };
+            const staticDataUrl = await rasterizeImageBlobToJpegDataUrl(result.blob, maxSide);
+            if (!staticDataUrl) throw new ChatEngineError("图片转换失败，请重新发送静态图片；本次尚未调用模型。");
+            return { url: staticDataUrl };
         }
-        return { url: await readCompressedImageDataUrl(result.blob) };
+        return { url: await readCompressedImageDataUrl(result.blob, maxSide) };
     }
 
     if (imageRef.startsWith("data:image/")) {
         const blob = dataUrlToBlob(imageRef);
-        if (!blob) return { keep: true };
+        if (!blob) throw new ChatEngineError("图片内容无效，请重新发送图片。");
         if (isGifMimeType(getImageRefMimeType(imageRef)) || isGifMimeType(blob.type)) {
-            const staticDataUrl = await rasterizeImageBlobToJpegDataUrl(blob);
-            return staticDataUrl ? { url: staticDataUrl } : { drop: true };
+            const staticDataUrl = await rasterizeImageBlobToJpegDataUrl(blob, maxSide);
+            if (!staticDataUrl) throw new ChatEngineError("图片转换失败，请重新发送静态图片；本次尚未调用模型。");
+            return { url: staticDataUrl };
         }
-        return { url: await readCompressedImageDataUrl(blob) };
+        return { url: await readCompressedImageDataUrl(blob, maxSide) };
     }
 
     try {
@@ -263,22 +267,25 @@ async function resolveVisionImageRefForApi(imageRef: string): Promise<VisionImag
         // 非 URL 引用继续交给下方的常规判断。
     }
 
-    if (isLikelyGifImageRef(imageRef)) {
+    if (requireInline || isLikelyGifImageRef(imageRef)) {
         const blob = await fetchRemoteImageBlob(imageRef);
-        if (!blob) return { drop: true };
-        const staticDataUrl = await rasterizeImageBlobToJpegDataUrl(blob);
-        return staticDataUrl ? { url: staticDataUrl } : { drop: true };
+        if (!blob || !blob.type.startsWith("image/")) {
+            throw new ChatEngineError("参考图片下载失败，尚未调用模型。请重新上传图片或检查图片链接的访问权限。");
+        }
+        const staticDataUrl = await rasterizeImageBlobToJpegDataUrl(blob, maxSide);
+        if (!staticDataUrl) throw new ChatEngineError("参考图片转换失败，尚未调用模型。请重新上传静态图片。");
+        return { url: staticDataUrl };
     }
 
     return { url: imageRef };
 }
 
-export async function prepareVisionPromptImageMessage(msg: ChatMessage): Promise<void> {
+export async function prepareVisionPromptImageMessage(msg: ChatMessage, requireInline = false, maxSide = LLM_IMAGE_MAX_SIDE): Promise<void> {
     if (msg.mediaType === "sticker") {
         if (msg.role !== "user") return;
         const stickerUrl = msg.mediaData?.stickerUrl?.trim();
         if (!stickerUrl) return;
-        const result = await resolveVisionImageRefForApi(stickerUrl);
+        const result = await resolveVisionImageRefForApi(stickerUrl, requireInline, maxSide);
         if ("url" in result) {
             msg.mediaData = { ...(msg.mediaData ?? {}), stickerUrl: result.url };
         } else if ("drop" in result) {
@@ -288,7 +295,7 @@ export async function prepareVisionPromptImageMessage(msg: ChatMessage): Promise
     }
 
     if (!isVisionPromptImageMessage(msg) || !msg.mediaUrl) return;
-    const result = await resolveVisionImageRefForApi(msg.mediaUrl);
+    const result = await resolveVisionImageRefForApi(msg.mediaUrl, requireInline, maxSide);
     if ("url" in result) {
         msg.mediaUrl = result.url;
     } else if ("drop" in result) {
@@ -323,16 +330,16 @@ function stripVisionPromptImageData(msg: ChatMessage): ChatMessage {
 
 export function applyVisionImagePromptLimit(history: ChatMessage[], limitValue: unknown): ChatMessage[] {
     const limit = normalizeVisionImagePromptLimit(limitValue);
-    let remaining = limit;
-
-    for (let index = history.length - 1; index >= 0; index -= 1) {
-        const msg = history[index];
-        if (!isVisionPromptImageMessage(msg) || !hasVisionPromptImageData(msg)) continue;
-        if (remaining > 0) {
-            remaining -= 1;
-            continue;
-        }
-        history[index] = stripVisionPromptImageData(msg);
+    // Prefer real user photographs; stickers and generated assistant media use only spare slots.
+    const candidates = history.map((msg, index) => ({ msg, index }))
+        .filter(({ msg }) => isVisionPromptImageMessage(msg) && hasVisionPromptImageData(msg))
+        .sort((a, b) => {
+            const priority = (msg: ChatMessage) => msg.role === "user" && msg.mediaType !== "sticker" ? 1 : 0;
+            return priority(b.msg) - priority(a.msg) || b.index - a.index;
+        });
+    const retained = new Set(candidates.slice(0, limit).map(item => item.index));
+    for (const { index } of candidates) {
+        if (!retained.has(index)) history[index] = stripVisionPromptImageData(history[index]);
     }
 
     return history;
@@ -1865,10 +1872,31 @@ export async function buildChatPromptMessages(
         session.visionImagePromptLimit,
     );
 
-    if (config.enableImageRecognition) {
+    let visualNotes = "";
+    if (config.enableImageRecognition && promptHistory.some(msg => isVisionPromptImageMessage(msg) && hasVisionPromptImageData(msg))) {
+        // Independent of ordinary text summaries. Only exact, attached image annotations are recalled.
+        let annotations: Awaited<ReturnType<typeof listVisualAnnotations>> = [];
+        try { annotations = await listVisualAnnotations(session.id); }
+        catch { throw new ChatEngineError("本地图片标注读取失败，请重试；本次尚未调用模型。"); }
+        visualNotes = await visualAnnotationPrompt(promptHistory, annotations);
+        let imageBytes = 0;
+        let omittedImages = 0;
+        const requireInline = providerKindForConfig(config) !== "openai-compatible";
         for (const msg of promptHistory) {
-            await prepareVisionPromptImageMessage(msg);
+            const hadImage = isVisionPromptImageMessage(msg) && hasVisionPromptImageData(msg);
+            const hadPhoto = msg.mediaUrl && (msg.mediaType === "image" || (msg.mediaType === "media_file" && msg.mediaData?.fileType === "image"));
+            await prepareVisionPromptImageMessage(msg, requireInline, session.visionImageHighDetail ? 1024 : 512);
+            if (hadPhoto && msg.mediaUrl) {
+                msg.mediaData = { ...msg.mediaData, label: `[图片消息ID:${msg.id}] ${msg.mediaData?.label ?? "图片"}` };
+            }
+            const ref = msg.mediaType === "sticker" ? msg.mediaData?.stickerUrl : msg.mediaUrl;
+            if (hadImage && !ref) omittedImages += 1;
+            if (ref?.startsWith("data:image/")) imageBytes += ref.length;
         }
+        if (omittedImages) visualNotes += `
+本轮有 ${omittedImages} 张快捷动作图片不可读取，未提供给模型；不得声称已看到其内容。`;
+        // Leave space for text and encrypted job envelopes within the cloud payload cap.
+        if (imageBytes > 600_000) throw new ChatEngineError("本次图片总大小过大，尚未调用模型。请关闭图片细节增强或减少传入最近图片数。");
     }
 
     const [memResults, coreResults, musicLocal, musicCloud] = await Promise.all([
@@ -1948,6 +1976,16 @@ export async function buildChatPromptMessages(
         offlineSummaryTag: preset?.story_summary_tag?.trim() || "summary",
         nativeToolHistory: usesNativeActions,
     });
+    if (visualNotes) llmMessages.unshift({ role: "system", content: visualNotes });
+    if (session.visionImageHighDetail) {
+        for (const message of llmMessages) {
+            if (Array.isArray(message.content)) {
+                for (const part of message.content) {
+                    if (part.type === "image_url") part.image_url.detail = "auto";
+                }
+            }
+        }
+    }
     if (promptProfile?.output === "plain_text") {
         llmMessages.push({
             role: "system",

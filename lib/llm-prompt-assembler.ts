@@ -208,7 +208,7 @@ function formatAnnotatedVisionBody(msg: ChatMessage, body: string): string {
     }
     return isImageGenerationMediaMessage(msg)
         ? formatImageGenerationDirective(msg, prefix)
-        : prefix;
+        : formatPhotoDirective(msg, prefix);
 }
 
 function formatAssistantImageHistoryText(msg: ChatMessage, body: string, showTs: boolean, ts: string): string {

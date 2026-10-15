@@ -1,3 +1,4 @@
+import { mirrorLocalProactiveMessages } from "./proactive-weixin-delivery";
 /**
  * Background follow-up service.
  * Runs independently of any React component — fires follow-ups
@@ -323,12 +324,15 @@ async function saveBackgroundCompletionRounds(
     currentCount: number,
     followUpIndex: number | undefined,
     contextMessages: ChatMessage[],
-    options?: { senderCharacterId?: string; senderName?: string; silent?: boolean },
+    options?: { senderCharacterId?: string; senderName?: string; silent?: boolean; syncProactiveToWeixin?: boolean },
 ): Promise<{ hasVisible: boolean; newCount: number; stateValues: StateValue[] }> {
+    const savedBatchIds = new Set<string>();
     let hasVisible = false;
     let newCount = currentCount;
     let stateValues: StateValue[] = [];
     for (const round of rounds) {
+        const responseBatchId = round.responseBatchId ?? createResponseBatchId();
+        savedBatchIds.add(responseBatchId);
         const result = await parseAndSaveResponse(
             round.text,
             sessionId,
@@ -337,7 +341,7 @@ async function saveBackgroundCompletionRounds(
             contextMessages,
             {
                 ...options,
-                responseBatchId: round.responseBatchId,
+                responseBatchId,
                 rawResponseText: round.rawResponseText,
                 reasoningText: round.reasoningText,
             },
@@ -350,6 +354,14 @@ async function saveBackgroundCompletionRounds(
         }
         if (result.stateValues.length > 0) {
             stateValues = result.stateValues;
+        }
+    }
+    if (hasVisible && options?.syncProactiveToWeixin) {
+        const session = loadChatSessions().find(item => item.id === sessionId);
+        if (session) {
+            const saved = loadChatMessages(sessionId).filter(message => Boolean(message.responseBatchId && savedBatchIds.has(message.responseBatchId)));
+            // Delivery failure must not fail the saved reply or start another model request.
+            void mirrorLocalProactiveMessages(session, saved).catch(error => console.warn("[ProactiveWeixin] 微信转发失败，Float 原消息已保留，没有重新生成:", error));
         }
     }
     return { hasVisible, newCount, stateValues };
@@ -507,7 +519,7 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
             return;
         }
 
-        const { hasVisible, newCount, stateValues } = await saveBackgroundCompletionRounds(rounds, session.id, sched.count, count, latestMessages);
+        const { hasVisible, newCount, stateValues } = await saveBackgroundCompletionRounds(rounds, session.id, sched.count, count, latestMessages, { syncProactiveToWeixin: true });
         console.log(`[FollowUp] Result: hasVisible=${hasVisible}, newCount=${newCount}`);
 
         // 本地已完成这一轮，撤销服务端对应的兜底预约（只撤本轮的精确键，
@@ -615,6 +627,7 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
             0,
             undefined,
             latestMessages,
+            { syncProactiveToWeixin: true },
         );
         markIdleReconnectFired(rule.id, Date.now());
         if (hasVisible) scheduleFollowUp(session.id, 0, stateValues);
@@ -674,6 +687,7 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
             0,
             undefined,
             latestMessages,
+            { syncProactiveToWeixin: true },
         );
         console.log(`[TimedWake] Result: hasVisible=${hasVisible}`);
 
@@ -738,6 +752,7 @@ async function fireMenstrualPeriodCare(input: {
             0,
             undefined,
             latestMessages,
+            { syncProactiveToWeixin: true },
         );
         saveMenstrualPeriodCareTrigger({
             characterId: input.characterId,

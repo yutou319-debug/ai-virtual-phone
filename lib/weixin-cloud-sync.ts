@@ -561,6 +561,21 @@ export async function setWeixinCloudAssistantScheduled(enabled: boolean): Promis
 }
 
 /** 从浏览器直接调用一次云函数，验证部署是否成功。 */
+/** Forward already-saved Float text; the cloud function must not store a second history copy. */
+export async function forwardExistingProactiveTextToWeixin(botId: string, text: string): Promise<void> {
+  const token = await ensureWeixinCloudCronSecret();
+  const response = await fetch(buildWeixinCloudAssistantFunctionUrl(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "send-text", token, bot: botId, text, mirrorOnly: true }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const result = await response.json().catch(() => ({})) as { ok?: boolean; mirrorOnly?: boolean; error?: string };
+  if (!response.ok || result.ok !== true || result.mirrorOnly !== true) {
+    throw new Error(result.error || "微信转发未确认，请更新微信云助手；没有再次生成或重发。");
+  }
+}
+
 export async function testWeixinCloudAssistantOnce(): Promise<{ ok: boolean; sent: number; error?: string }> {
   const config = requireCloudBackupConfig();
   const token = await ensureWeixinCloudCronSecret();

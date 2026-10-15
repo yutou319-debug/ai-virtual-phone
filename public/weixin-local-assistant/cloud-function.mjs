@@ -109,10 +109,12 @@ export async function pollOnce(env, targetBotId, options = {}) {
       : ilinkErrorCode !== undefined ? `iLink error_code ${ilinkErrorCode}` : undefined;
     await saveBotState(env, item.botId, state);
 
+    // getupdates can long-poll; receipt time must be captured after it returns.
+    const receivedAt = new Date().toISOString();
     let storedMessages = 0;
     let lastStoredExternalId = "";
     for (const message of messages) {
-      const storedId = await storeIncomingMessage(env, runtime, message, polledAt);
+      const storedId = await storeIncomingMessage(env, runtime, message, receivedAt);
       if (storedId) {
         storedMessages += 1;
         lastStoredExternalId = storedId;
@@ -122,7 +124,7 @@ export async function pollOnce(env, targetBotId, options = {}) {
       await savePendingFlag(env, item.botId, {
         pending: true,
         lastInboundExternalId: lastStoredExternalId,
-        pendingMarkedAt: polledAt,
+        pendingMarkedAt: new Date().toISOString(),
       });
     }
 
@@ -298,6 +300,17 @@ function sniffImageMimeType(bytes) {
   return "";
 }
 
+/** Quiet period based on server receipt time, never on a user's device clock. */
+export function weixinBatchWaitRemaining(messages, markedAt, nowMs = Date.now(), waitMs = 8000) {
+  let latestMs = Number.isFinite(Date.parse(markedAt || "")) ? Date.parse(markedAt) : 0;
+  for (const message of messages) {
+    const receivedMs = Date.parse(message.receivedAt || "");
+    if (Number.isFinite(receivedMs)) latestMs = Math.max(latestMs, receivedMs);
+  }
+  // Old records without server receipt metadata are processed normally.
+  return latestMs ? Math.max(0, latestMs + waitMs - nowMs) : 0;
+}
+
 async function autoReplyPendingMessages(env, runtime, options = {}) {
   if (String(env.WEIXIN_AUTO_REPLY || "").trim().toLowerCase() === "false") {
     return { status: "disabled", pending: 0, sent: 0 };
@@ -306,12 +319,12 @@ async function autoReplyPendingMessages(env, runtime, options = {}) {
   // 空闲轮询只读几百字节的待回复标志，不再每轮全量下载消息目录
   // （那会随消息积压滚雪球，实测能烧掉 30G+/天的 Cached Egress）。
   // 标志缺失（老部署首轮）或超过兜底间隔时仍做全量扫描。
-  if (options.force !== true) {
-    const flag = await loadPendingFlag(env, runtime.bot.id);
-    if (flag && flag.pending !== true && !reconcileScanDue(flag)) {
-      return { status: "idle", pending: 0, sent: 0 };
-    }
+  const flag = await loadPendingFlag(env, runtime.bot.id);
+  if (options.force !== true && flag && flag.pending !== true && !reconcileScanDue(flag)) {
+    return { status: "idle", pending: 0, sent: 0 };
   }
+  const flagWaitMs = flag?.pending === true ? weixinBatchWaitRemaining([], flag.pendingMarkedAt) : 0;
+  if (flagWaitMs > 0) return { status: "collecting", pending: 0, sent: 0, waitMs: flagWaitMs };
 
   const lock = await acquireAutoReplyLock(env, runtime.bot.id);
   if (!lock) return { status: "locked", pending: 0, sent: 0 };
@@ -325,6 +338,9 @@ async function autoReplyPendingMessages(env, runtime, options = {}) {
     await savePendingFlag(env, runtime.bot.id, { pending: false, lastScanAt: new Date().toISOString() });
     return { status: "skipped", pending: 0, sent: 0 };
   }
+
+  const batchWaitMs = weixinBatchWaitRemaining(pending.map(item => item.message), flag?.pendingMarkedAt);
+  if (batchWaitMs > 0) return { status: "collecting", pending: pending.length, sent: 0, waitMs: batchWaitMs };
 
   const latest = pending[pending.length - 1].message;
   const stopTyping = await startIlinkTyping(runtime.bot?.botToken, latest.raw);
@@ -1943,7 +1959,7 @@ async function storeOutgoingMessage(env, runtime, externalId, content, raw, repl
 // 离线主动发送：借该 bot 最近一条入站消息的回复上下文（context_token）发文本。
 // iLink 协议只能"回复"，不能凭空向任意用户发起会话；用户太久没发过微信
 // 消息时令牌可能失效，调用方（push-generate / push-bridge）需准备回退渠道。
-export async function sendProactiveText(env, botId, text, replyAnchor) {
+export async function sendProactiveText(env, botId, text, replyAnchor, options) {
   const index = await loadRuntimeIndex(env);
   const item = index.packages.find(entry => entry.botId === botId);
   if (!item) throw new Error("bot_not_found: 云端没有该微信的运行包，请在小手机同步一次");
@@ -1973,14 +1989,17 @@ export async function sendProactiveText(env, botId, text, replyAnchor) {
       if (sent === 0) throw new Error(`ilink error_code ${errorCode}`);
       break;
     }
-    await storeOutgoingMessage(env, runtime, `proactive-${Date.now()}-${sent}`, part, raw,
-      localMessageId && anchorCreatedAt
-        ? { localMessageId, createdAt: anchorCreatedAt, sequence: sent }
-        : undefined);
+    // Local Float generation already saved/synced its history. Do not import a second copy.
+    if (options?.mirrorOnly !== true) {
+      await storeOutgoingMessage(env, runtime, `proactive-${Date.now()}-${sent}`, part, raw,
+        localMessageId && anchorCreatedAt
+          ? { localMessageId, createdAt: anchorCreatedAt, sequence: sent }
+          : undefined);
+    }
     sent += 1;
     if (sent < parts.length) await new Promise(resolve => setTimeout(resolve, 800));
   }
-  return { sent };
+  return { sent, ...(options?.mirrorOnly === true ? { mirrorOnly: true } : {}) };
 }
 
 async function loadCloudMessagesForBot(env, botId, limit = 200) {
@@ -2510,11 +2529,12 @@ Deno.serve(async (req) => {
     const bucketSendFn = bucketCore && typeof bucketCore.sendProactiveText === "function"
       ? bucketCore.sendProactiveText
       : null;
-    const sendFn = bucketSendFn && (!replyAnchor.localMessageId || bucketSendFn.length >= 4)
+    const mirrorOnly = body?.mirrorOnly === true;
+    const sendFn = bucketSendFn && (mirrorOnly ? bucketSendFn.length >= 5 : (!replyAnchor.localMessageId || bucketSendFn.length >= 4))
       ? bucketSendFn
       : sendProactiveText;
     try {
-      const result = await sendFn(env, botId, text, replyAnchor);
+      const result = await sendFn(env, botId, text, replyAnchor, { mirrorOnly });
       return cloudJsonResponse(200, { ok: true, ...result });
     } catch (err) {
       return cloudJsonResponse(500, { ok: false, error: errorMessage(err) });

@@ -13,7 +13,7 @@ import { isPersonalPushCloudActive, personalPushFetch, pushJobsFetch } from "./p
 import {
     buildOfflineShortcutContinuation,
     maybeAppendShortcutCapability,
-    maybeAppendWeixinChannel,
+    offlineWeixinBotIdFor,
     type OfflineShortcutContinuation,
 } from "./offline-shortcut-capability";
 import {
@@ -368,6 +368,7 @@ export async function armFollowUpBailout(
         // 但标记式快捷动作云端是支持的（push-generate 解析【快捷动作：名称】），
         // 所以照常注入动作目录，别让角色在离线追问里以为自己什么都做不了。
         maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
+        const weixinBotId = offlineWeixinBotIdFor(session.contactId);
         const request = buildProviderRequest(config, preset, toLlmRequestMessages(llmMessages));
         const shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
             const req = buildProviderRequest(config, preset, toLlmRequestMessages(messages));
@@ -393,6 +394,7 @@ export async function armFollowUpBailout(
                         providerKind: request.providerKind,
                     },
                     notify: { title: character.name, url: "/" },
+                    ...(weixinBotId ? { weixin: { botId: weixinBotId, force: true } } : {}),
                     ...(shortcutContinuation ? { shortcutContinuation } : {}),
                     merge: {
                         sessionId,
@@ -439,7 +441,7 @@ async function postBailoutJob(input: {
                     providerKind: input.request.providerKind,
                 },
                 notify: { title: input.notifyTitle, url: "/" },
-                ...(input.weixinBotId ? { weixin: { botId: input.weixinBotId } } : {}),
+                ...(input.weixinBotId ? { weixin: { botId: input.weixinBotId, force: true } } : {}),
                 ...(input.shortcutContinuation ? { shortcutContinuation: input.shortcutContinuation } : {}),
                 merge: input.merge,
             },
@@ -527,7 +529,7 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         );
         maybeAppendCallInvite(llmMessages, rule.characterId);
         maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
-        const weixinBotId = maybeAppendWeixinChannel(llmMessages, rule.characterId);
+        const weixinBotId = offlineWeixinBotIdFor(rule.characterId);
         const request = buildProviderRequest(config, preset, toLlmRequestMessages(llmMessages));
         const shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
             const req = buildProviderRequest(config, preset, toLlmRequestMessages(messages));
@@ -601,7 +603,7 @@ export async function armTimedWakeBailout(schedule: TimedWakeSchedule): Promise<
         );
         maybeAppendCallInvite(llmMessages, schedule.characterId);
         maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
-        const weixinBotId = maybeAppendWeixinChannel(llmMessages, schedule.characterId);
+        const weixinBotId = offlineWeixinBotIdFor(schedule.characterId);
         const request = buildProviderRequest(config, preset, toLlmRequestMessages(llmMessages));
         const shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
             const req = buildProviderRequest(config, preset, toLlmRequestMessages(messages));
@@ -670,6 +672,7 @@ export async function armPeriodCareBailouts(): Promise<void> {
                     { appTags: ["chat", "text", "period_care"], periodCareContext: event.context },
                 );
                 maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
+                const weixinBotId = offlineWeixinBotIdFor(session.contactId);
                 const request = buildProviderRequest(apiConfig, preset, toLlmRequestMessages(llmMessages));
                 const shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
                     const req = buildProviderRequest(apiConfig, preset, toLlmRequestMessages(messages));
@@ -681,6 +684,7 @@ export async function armPeriodCareBailouts(): Promise<void> {
                     executeAtMs,
                     request,
                     notifyTitle: characterName,
+                    weixinBotId,
                     shortcutContinuation,
                     merge: {
                         sessionId: session.id,
@@ -714,6 +718,9 @@ export async function armDailyContactRule(rule: DailyContactRule, refreshOnly = 
         const { llmMessages, character, config, preset, regexes, userIdentity } = await buildChatPromptMessages(
             session, loadChatMessages(session.id), { appTags: ["chat", "text", "daily_contact"] },
         );
+        // Daily contact uses the already paired cloud bot deterministically. Do not ask the
+        // model to choose a channel or generate a second reply for WeChat.
+        const weixinBotId = offlineWeixinBotIdFor(rule.characterId);
         llmMessages.push({ role: "system", content: "这是用户授权的每日主动联系。自然地开启一个简短话题；用户即使多天没有回复也可以关心对方，但不要编造用户的新消息。只发文字，不生成图片，不调用工具、快捷动作或发起通话。" });
         const request = buildProviderRequest(config, preset, toLlmRequestMessages(llmMessages));
         // A daily attempt must never create a second paid tool continuation.
@@ -724,6 +731,7 @@ export async function armDailyContactRule(rule: DailyContactRule, refreshOnly = 
             body: JSON.stringify({ id: rule.id, characterId: rule.characterId, sessionId: rule.sessionId, minutes: dailyContactMinutes(buildQuietWindowMeta()), payload: {
                 request: { url: request.url, headers: request.headers, body: request.body, providerKind: request.providerKind },
                 notify: { title: character.name, url: "/" },
+                ...(weixinBotId ? { weixin: { botId: weixinBotId, force: true } } : {}),
                 merge: { sessionId: session.id, prevCount: 0, regexes, characterName: character.name,
                     userName: userIdentity?.name ?? "用户", appId: "chat", appTags: ["chat", "text", "daily_contact"], dailyRuleId: rule.id },
             } }),

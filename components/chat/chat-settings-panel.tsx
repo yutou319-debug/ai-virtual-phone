@@ -1,5 +1,6 @@
 "use client";
 
+import { VisualAnnotationButton } from "./visual-annotation-button";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
     CHAT_INITIAL_VISIBLE_MESSAGE_COUNT,
@@ -388,6 +389,7 @@ export function ChatSettingsPanel({
         setPreviewHtml("");
         setShowStatusRegionDialog(true);
     };
+    const [visionImageHighDetail, setVisionImageHighDetail] = useState(Boolean(session.visionImageHighDetail));
     const [visionImagePromptLimit, setVisionImagePromptLimit] = useState(() => normalizeVisionImagePromptLimit(session.visionImagePromptLimit));
     const [bilingualTranslationEnabled, setBilingualTranslationEnabled] = useState(session.bilingualTranslationEnabled !== false);
     const [offlineSummaryRetry, setOfflineSummaryRetry] = useState(session.offlineSummaryRetry !== false);
@@ -998,7 +1000,7 @@ export function ChatSettingsPanel({
                         <ChatInfoIcon icon={ImageIcon} color={BINDING_ACCENTS.api} />
                         <div className="menu-label-group">
                             <span className="menu-label">传入最近图片数</span>
-                            <span className="menu-desc">进入模型视觉上下文的最近图片数量，0 表示不传图片内容</span>
+                            <span className="menu-desc">用户照片优先；0 不传图片。多图会增加输入费用，建议 2–3 张</span>
                         </div>
                         <div className="menu-right gap-2">
                             <button
@@ -1026,6 +1028,19 @@ export function ChatSettingsPanel({
                                 +
                             </button>
                         </div>
+                    </div>
+                    <div className="menu-item">
+                        <ChatInfoIcon icon={ImageIcon} color={BINDING_ACCENTS.api} />
+                        <div className="menu-label-group"><span className="menu-label">本地图片标注</span></div>
+                        <VisualAnnotationButton sessionId={session.id} />
+                    </div>
+                    <div className="menu-item">
+                        <ChatInfoIcon icon={ImageIcon} color={BINDING_ACCENTS.api} />
+                        <div className="menu-label-group">
+                            <span className="menu-label">图片细节增强</span>
+                            <span className="menu-desc">最长边 1024 像素；可能增加输入费用。关闭使用 512 像素</span>
+                        </div>
+                        <Toggle checked={visionImageHighDetail} onChange={value => { setVisionImageHighDetail(value); updateSession({ visionImageHighDetail: value }); }} />
                     </div>
                     <>
                         <div className="menu-item">

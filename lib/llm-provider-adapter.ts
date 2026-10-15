@@ -452,7 +452,7 @@ function anthropicContentFromParts(content: string | LLMContentPart[]): unknown[
     return content.flatMap<unknown>((part) => {
         if (part.type === "text") return part.text ? [{ type: "text", text: part.text }] : [];
         const parsed = parseDataUrl(part.image_url.url);
-        if (!parsed) return [{ type: "text", text: "[image omitted: unsupported image URL]" }];
+        if (!parsed) throw new Error("图片尚未转换为 Anthropic 支持的内嵌格式；尚未发送请求，请重新上传图片。");
         return [{
             type: "image",
             source: {
@@ -469,7 +469,7 @@ function geminiContentFromParts(content: string | LLMContentPart[]): unknown[] {
     return content.flatMap<unknown>((part) => {
         if (part.type === "text") return part.text ? [{ text: part.text }] : [];
         const parsed = parseDataUrl(part.image_url.url);
-        if (!parsed) return [{ text: "[image omitted: unsupported image URL]" }];
+        if (!parsed) throw new Error("图片尚未转换为 Gemini 支持的内嵌格式；尚未发送请求，请重新上传图片。");
         return [{
             inlineData: {
                 mimeType: parsed.mimeType,

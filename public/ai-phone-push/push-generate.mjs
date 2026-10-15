@@ -1041,7 +1041,7 @@ Deno.serve(async (req: Request) => {
     {
       const head = rawText.slice(0, 200);
       const markerAt = head.indexOf(WEIXIN_MARKER);
-      const forceWeixin = payload.weixin?.force === true;
+      const forceWeixin = payload.weixin?.force === true && !deliverAsCall;
       if (markerAt >= 0 || forceWeixin) {
         if (markerAt >= 0) {
           rawText = (rawText.slice(0, markerAt) + rawText.slice(markerAt + WEIXIN_MARKER.length)).trim();
