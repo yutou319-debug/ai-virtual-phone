@@ -7,7 +7,7 @@ const CLOUD_CRON_SECRET_PATH = "weixin-cloud/cron-secret.json";
 const CLOUD_ASSISTANT_STATE_PATH = "weixin-cloud/state/cloud-assistant.json";
 const CLOUD_CRON_JOB_NAME = "ai-phone-weixin-assistant";
 const CLOUD_CORE_CODE_PATH = "weixin-cloud/function-core.mjs";
-const REQUIRED_BUCKET_CORE_PROTOCOL_VERSION = 3;
+const REQUIRED_BUCKET_CORE_PROTOCOL_VERSION = 4;
 
 // ── 自更新加载器 ──
 // 小手机同步运行包时会把最新的 assistant-core.mjs 上传到桶里；这里每次运行
