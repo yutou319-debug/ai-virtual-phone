@@ -7,7 +7,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 
 // 云函数动态核心协议版本。wrapper 只加载版本一致的桶内核心，避免站点更新后
 // 继续执行旧桶里不认识微信快捷动作续跑的代码。
-export const WEIXIN_CORE_PROTOCOL_VERSION = 4;
+export const WEIXIN_CORE_PROTOCOL_VERSION = 5;
 export const DEFAULT_BUCKET = "ai-phone-backup";
 export const DEFAULT_INTERVAL_SECONDS = 5;
 const INDEX_PATH = "weixin-cloud/index.json";

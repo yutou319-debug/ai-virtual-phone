@@ -52,10 +52,10 @@ const coreStart=engine.indexOf('async function generateChatCompletionCore(');
 const coreEnd=engine.indexOf('    if (toolsEnabled && nativeToolProtocolForConfig',coreStart);
 let core=engine.slice(coreStart,coreEnd)+'\n return "local";\n}';
 core=core.replace('await import("./push-bailout-client")','cloudModule');
-const makeCore=new Function('buildChatPromptMessages','mergeAppTags','maybeAppendShortcutCapability','cloudModule','buildProviderRequest','toLlmRequestMessages',transpile(core)+';return generateChatCompletionCore;');
+const makeCore=new Function('buildChatPromptMessages','mergeAppTags','maybeAppendShortcutCapability','cloudModule','buildProviderRequest','toLlmRequestMessages','getInternalCapability','parseCloudTimedWakeRequest','offlineWeixinBotIdFor',transpile(core)+';return generateChatCompletionCore;');
 (async()=>{
  for(const decision of ['cloud','uncertain','local']){
-  const run=makeCore(async()=>({llmMessages:[],character:{name:'n'},config:{},preset:{},regexes:[],userIdentity:{},toolsEnabled:false}),()=>[],()=>{}, {queueCloudReplyOnce:async()=>{if(decision==='uncertain')throw Error('lost acknowledgement');return decision==='cloud'}},()=>({}),x=>x);
+  const run=makeCore(async()=>({llmMessages:[],character:{name:'n'},config:{},preset:{},regexes:[],userIdentity:{},toolsEnabled:false}),()=>[],()=>{}, {queueCloudReplyOnce:async()=>{if(decision==='uncertain')throw Error('lost acknowledgement');return decision==='cloud'}},()=>({}),x=>x,()=>undefined,()=>undefined,()=> '');
   let result,error;try{result=await run({id:'s',isGroup:false},[{id:'m',sessionId:'s',role:'user',createdAt:'date'}],{}, {}, {})}catch(e){error=e}
   if(decision==='local'&&result!=='local')throw Error('inactive cloud did not continue');
   if(decision!=='local'&&result==='local')throw Error('local provider reached after cloud submission');

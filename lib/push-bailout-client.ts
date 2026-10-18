@@ -32,6 +32,7 @@ import { dailyContactMinutes, loadDailyContactRules, type DailyContactRule } fro
 import { loadCharacters } from "./character-storage";
 import type { RegexConfig } from "./settings-types";
 import type { LLMMessage } from "./llm-prompt-assembler";
+import type { CloudTimedWakeRequest } from "./cloud-timed-wake";
 
 // ── 离线来电：让 AI 自己决定"这条主动消息要不要改成打电话" ──────────
 // 只在主动类离线任务（冷场重连/定时唤醒）的生成快照里注入一句能力说明；
@@ -132,6 +133,7 @@ export async function armReplyBailout(params: {
     /** 云回复必须排在这条本地输入之后；跨设备排序不能只依赖两边时钟。 */
     replyAfter?: { localMessageId: string; createdAt: string };
     signal?: AbortSignal;
+    timedWake?: CloudTimedWakeRequest;
 }): Promise<ReplyBailoutHandle | null> {
     if (!bailoutEnabled()) return null;
     if (!(await hasAccountPushSubscription())) return null;
@@ -243,6 +245,10 @@ export async function queueCloudReplyOnce(params: Parameters<typeof armReplyBail
             executeAt: new Date().toISOString(),
             payload: {
                 request: params.request,
+                timedWake: params.timedWake ? {
+                    ...params.timedWake,
+                    blocked: isWithinPushQuietHours(Date.parse(params.timedWake.executeAt)),
+                } : undefined,
                 notify: { title: params.characterName, url: "/" },
                 merge: {
                     sessionId: params.sessionId,

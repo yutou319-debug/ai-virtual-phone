@@ -1,0 +1,15 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),ts=require('typescript');
+const src=fs.readFileSync('supabase/functions/ai-phone-push/index.ts','utf8');
+const limit=new Function('return '+src.match(/const MAX_PAYLOAD_BYTES = ([^;]+);/)[1])();
+assert.equal(limit,4*1024*1024);
+const start=src.indexOf('        const plainJson = JSON.stringify(body.payload);');
+const end=src.indexOf('        const config = await loadConfig();',start);
+const code=ts.transpileModule(src.slice(start,end),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
+const check=new Function('body','MAX_PAYLOAD_BYTES','json',code);
+assert.equal(check({payload:{text:'a'.repeat(1_200_000)}},limit,(body,status)=>status),undefined);
+assert.equal(check({payload:{text:'中'.repeat(1_000_000)}},limit,(body,status)=>status),undefined);
+assert.equal(check({payload:{text:'中'.repeat(1_500_000)}},limit,(body,status)=>status),413);
+const overhead=new TextEncoder().encode(JSON.stringify({text:''})).length;
+assert.equal(check({payload:{text:'a'.repeat(limit-overhead)}},limit,(body,status)=>status),undefined);
+assert.equal(check({payload:{text:'a'.repeat(limit-overhead+1)}},limit,(body,status)=>status),413);
+console.log('PASS: gateway accepts previously oversized snapshots and exact 4 MiB boundary; rejects excess UTF-8 bytes.');
