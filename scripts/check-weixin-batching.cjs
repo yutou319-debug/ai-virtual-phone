@@ -1,8 +1,8 @@
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),ts=require('typescript');
 const source=fs.readFileSync('tools/weixin-local-assistant/assistant-core.mjs','utf8');
 const ast=ts.createSourceFile('core.mjs',source,ts.ScriptTarget.Latest,true);
-assert.ok(source.includes('WEIXIN_CORE_PROTOCOL_VERSION = 5'), 'updated core has a distinct protocol version');
-assert.ok(fs.readFileSync('tools/weixin-local-assistant/cloud-function-wrapper.mjs','utf8').includes('REQUIRED_BUCKET_CORE_PROTOCOL_VERSION = 5'), 'loader rejects stale bucket code without voice/sticker fixes');
+assert.ok(source.includes('WEIXIN_CORE_PROTOCOL_VERSION = 6'), 'updated core has a distinct protocol version');
+assert.ok(fs.readFileSync('tools/weixin-local-assistant/cloud-function-wrapper.mjs','utf8').includes('REQUIRED_BUCKET_CORE_PROTOCOL_VERSION = 6'), 'loader rejects stale bucket code without send result validation');
 const names=['weixinBatchWaitRemaining','autoReplyPendingMessages','filterUnavailableStickerMarkers'];
 const selected=ast.statements.filter(node=>ts.isFunctionDeclaration(node)&&names.includes(node.name?.text));
 let now=100000,rows=[],flag=null,locked=false,generated=[],sent=0,releases=0;

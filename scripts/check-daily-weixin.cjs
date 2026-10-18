@@ -65,7 +65,7 @@ const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
         assert.equal(sends, ['unpaired','missing-secret'].includes(scenario) ? 0 : 1, 'at most one WeChat delivery attempt');
         assert.equal(outbox.length, scenario === 'success' ? 0 : 1, 'successful WeChat delivery does not create a duplicate Float outbox row');
         if(outbox.length) assert.equal(outbox[0][0].raw_text, '今天想和你分享一件小事。', 'fallback preserves the same generated result');
-        if(scenario === 'success') assert.equal(finished[0][0], 'done');
+        if(scenario === 'success') assert.equal(finished.length, 0, 'WeChat acceptance must not finish early before independent Web Push');
     }
     // Verify successful proactive sending also stores one outgoing record for Float sync.
     const core = fs.readFileSync('tools/weixin-local-assistant/assistant-core.mjs','utf8');
@@ -81,6 +81,11 @@ const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
     vm.runInNewContext(transpile(sendDeclaration.getText(coreAst)),coreContext);
     assert.equal((await coreContext.exports.sendProactiveText({},'paired-luchen','今天想和你分享一件小事。')).sent,1);
     assert.equal(recorded.length,1); assert.equal(recorded[0][3],'今天想和你分享一件小事。');
+    for (const error of [{ret:-2},{errcode:-14},{error_code:-2},{ret:'-2'}]) {
+        coreContext.sendIlinkTextMessage=async()=>error;
+        await assert.rejects(()=>coreContext.exports.sendProactiveText({},'paired-luchen','测试文本'),/ilink error_code/);
+        assert.equal(recorded.length,1,'a rejected send must not create fake outgoing history');
+    }
     assert.equal(paid,0);
     console.log('PASS: paired daily snapshots force WeChat with one generated result; unpaired stays Float; refresh works; successful send stores one WeChat/Float history record without duplicate outbox; expired context, missing secret and network failure preserve the same text in Float. No real network, WeChat messages or model calls.');
 })();
