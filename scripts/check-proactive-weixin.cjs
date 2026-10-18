@@ -73,7 +73,8 @@ function load(file,mocks={},globals={},source=fs.readFileSync(file,'utf8')) {
  const core=load('tools/weixin-local-assistant/assistant-core.mjs',{}, {
   loadRuntimeIndex:async()=>({packages:[{botId:'paired'}]}),loadRuntimePackage:async()=>({bot:{botToken:'mock'}}),
   loadCloudMessagesForBot:async()=>[{message:{direction:'inbound',raw:{context_token:'mock',from_user_id:'self'}}}],
-  sendIlinkTextMessage:async()=>{sent++;return {error_code:0};},storeOutgoingMessage:async()=>stored++,
+  buildProactiveWeixinItems:text=>[{kind:'text',text}],
+  sendLocalReplyItem:async()=>{sent++;return {error_code:0};},storeOutgoingMessage:async()=>stored++,
  },codeFor('tools/weixin-local-assistant/assistant-core.mjs',['sendProactiveText']));
  assert.equal((await core.sendProactiveText({},'paired','已存正文',undefined,{mirrorOnly:true})).mirrorOnly,true);
  assert.equal(sent,1);assert.equal(stored,0);

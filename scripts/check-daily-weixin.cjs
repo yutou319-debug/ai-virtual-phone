@@ -75,14 +75,15 @@ const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
     const coreContext = { exports:{},
         loadRuntimeIndex: async () => ({packages:[{botId:'paired-luchen'}]}), loadRuntimePackage: async () => ({bot:{botToken:'mock-only'}}),
         loadCloudMessagesForBot: async () => [{message:{direction:'inbound',raw:{context_token:'mock-context',from_user_id:'mock-user'}}}],
-        sendIlinkTextMessage: async () => ({error_code:0}), storeOutgoingMessage: async (...args) => recorded.push(args),
+        buildProactiveWeixinItems: text => [{kind:'text',text}],
+        sendLocalReplyItem: async () => ({error_code:0}), storeOutgoingMessage: async (...args) => recorded.push(args),
         setTimeout: () => { throw Error('test sends only one segment'); },
     };
     vm.runInNewContext(transpile(sendDeclaration.getText(coreAst)),coreContext);
     assert.equal((await coreContext.exports.sendProactiveText({},'paired-luchen','今天想和你分享一件小事。')).sent,1);
     assert.equal(recorded.length,1); assert.equal(recorded[0][3],'今天想和你分享一件小事。');
     for (const error of [{ret:-2},{errcode:-14},{error_code:-2},{ret:'-2'}]) {
-        coreContext.sendIlinkTextMessage=async()=>error;
+        coreContext.sendLocalReplyItem=async()=>error;
         await assert.rejects(()=>coreContext.exports.sendProactiveText({},'paired-luchen','测试文本'),/ilink error_code/);
         assert.equal(recorded.length,1,'a rejected send must not create fake outgoing history');
     }

@@ -24,7 +24,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 
 // 云函数动态核心协议版本。wrapper 只加载版本一致的桶内核心，避免站点更新后
 // 继续执行旧桶里不认识微信快捷动作续跑的代码。
-export const WEIXIN_CORE_PROTOCOL_VERSION = 6;
+export const WEIXIN_CORE_PROTOCOL_VERSION = 7;
 export const DEFAULT_BUCKET = "ai-phone-backup";
 export const DEFAULT_INTERVAL_SECONDS = 5;
 const INDEX_PATH = "weixin-cloud/index.json";
@@ -1703,8 +1703,8 @@ async function fetchWithTimeout(url, init, timeoutMs = TTS_TIMEOUT_MS) {
 function cleanWeixinDisplayText(text) {
   let cleaned = cleanReplyText(text)
     .replace(/\r\n?/g, "\n")
-    .replace(/\[状态栏\][\s\S]*?\[\/状态栏\]/g, "")
-    .replace(/\[内心\][\s\S]*?\[\/内心\]/g, "")
+    .replace(/\[(状态栏|内心)\][\s\S]*?(?:\[\/\1\]|$)/g, "")
+    .replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "")
     .replace(/<summary>[\s\S]*?<\/summary>/gi, "")
     .replace(/\[[^\[\]:：\]\n]+[：:]\d+(?:\.\d+)?\]/g, (match) => {
       const name = match.slice(1).split(/[：:]/)[0]?.trim() || "";
@@ -1993,8 +1993,8 @@ export async function sendProactiveText(env, botId, text, replyAnchor, options) 
     && row.message?.raw?.from_user_id);
   if (!target) throw new Error("no_reply_context: 该微信最近没有入站消息，无法主动发送");
   const raw = target.message.raw;
-  const segments = String(text).split(/\n{2,}/).map(part => part.trim()).filter(Boolean).slice(0, 4);
-  const parts = segments.length > 0 ? segments : [String(text).trim()];
+  const parts = buildProactiveWeixinItems(text, runtime);
+  if (!parts.length) return { sent: 0, skipped: "no_visible_content" };
   const localMessageId = typeof replyAnchor?.localMessageId === "string"
     ? replyAnchor.localMessageId.trim().slice(0, 240)
     : "";
@@ -2003,7 +2003,8 @@ export async function sendProactiveText(env, botId, text, replyAnchor, options) 
     : "";
   let sent = 0;
   for (const part of parts) {
-    const data = await sendIlinkTextMessage(botToken, raw, part);
+    // Existing sticker assets only. No image generation, TTS or second model call.
+    const data = await sendLocalReplyItem(botToken, raw, part);
     const errorCode = [data?.ret, data?.errcode, data?.error_code]
       .filter(value => value !== undefined && value !== null && value !== "")
       .map(Number).find(value => Number.isFinite(value) && value !== 0);
@@ -2012,8 +2013,10 @@ export async function sendProactiveText(env, botId, text, replyAnchor, options) 
       break;
     }
     // Local Float generation already saved/synced its history. Do not import a second copy.
-    if (options?.mirrorOnly !== true) {
-      await storeOutgoingMessage(env, runtime, `proactive-${Date.now()}-${sent}`, part, raw,
+    if (options?.mirrorOnly !== true && sent === 0) {
+      // Float keeps the original response, including its private status card and
+      // sticker markers. WeChat receives only the cleaned display items above.
+      await storeOutgoingMessage(env, runtime, `proactive-${Date.now()}`, String(text), raw,
         localMessageId && anchorCreatedAt
           ? { localMessageId, createdAt: anchorCreatedAt, sequence: sent }
           : undefined);
@@ -2022,6 +2025,25 @@ export async function sendProactiveText(env, botId, text, replyAnchor, options) 
     if (sent < parts.length) await new Promise(resolve => setTimeout(resolve, 800));
   }
   return { sent, ...(options?.mirrorOnly === true ? { mirrorOnly: true } : {}) };
+}
+
+function buildProactiveWeixinItems(text, runtime) {
+  const map = runtime?.promptContext?.customStickerMap || runtime?.customStickerMap || {};
+  const cleaned = filterUnavailableStickerMarkers(cleanWeixinDisplayText(text), map);
+  const out = [];
+  const addText = value => {
+    for (const paragraph of splitLocalReplyText(value)) out.push({ kind: "text", text: paragraph });
+  };
+  const pattern = /\[表情包\s*[：:]\s*([^\]]+)\]/g;
+  let cursor = 0;
+  for (const match of cleaned.matchAll(pattern)) {
+    addText(cleaned.slice(cursor, match.index));
+    const image = resolveRuntimeStickerImage(runtime, match[1]);
+    if (image && runtime?.promptContext?.mediaReply !== false) out.push({ kind: "image", imageDataUrl: image, label: match[0] });
+    cursor = match.index + match[0].length;
+  }
+  addText(cleaned.slice(cursor));
+  return out.slice(0, 16);
 }
 
 async function loadCloudMessagesForBot(env, botId, limit = 200) {
@@ -2331,7 +2353,7 @@ const CLOUD_CRON_SECRET_PATH = "weixin-cloud/cron-secret.json";
 const CLOUD_ASSISTANT_STATE_PATH = "weixin-cloud/state/cloud-assistant.json";
 const CLOUD_CRON_JOB_NAME = "ai-phone-weixin-assistant";
 const CLOUD_CORE_CODE_PATH = "weixin-cloud/function-core.mjs";
-const REQUIRED_BUCKET_CORE_PROTOCOL_VERSION = 6;
+const REQUIRED_BUCKET_CORE_PROTOCOL_VERSION = 7;
 
 // ── 自更新加载器 ──
 // 小手机同步运行包时会把最新的 assistant-core.mjs 上传到桶里；这里每次运行
