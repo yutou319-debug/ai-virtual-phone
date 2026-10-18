@@ -1105,6 +1105,7 @@ Deno.serve(async (req: Request) => {
     // 的结果续跑使用 force，保证第二轮无需模型再次决定渠道也回到同一 bot。 ──
     const WEIXIN_MARKER = "【发到微信】";
     let deliveredViaWeixin = false;
+    let weixinDeliveryNote = "";
     {
       const head = rawText.slice(0, 200);
       const markerAt = head.indexOf(WEIXIN_MARKER);
@@ -1147,35 +1148,28 @@ Deno.serve(async (req: Request) => {
                     : {}),
                 }),
               });
-              const sendData = await sendResponse.json().catch(() => ({})) as { ok?: boolean; error?: string };
-              deliveredViaWeixin = sendResponse.ok && sendData.ok === true;
+              const sendData = await sendResponse.json().catch(() => ({})) as { ok?: boolean; sent?: number; error?: string };
+              deliveredViaWeixin = sendResponse.ok && sendData.ok === true && Number(sendData.sent) > 0;
+              weixinDeliveryNote = deliveredViaWeixin ? "weixin API accepted" : `weixin not confirmed: ${String(sendData.error || sendResponse.status).slice(0, 100)}`;
               await progress(deliveredViaWeixin
                 ? "delivered via weixin"
                 : `weixin send failed: ${String(sendData.error || sendResponse.status).slice(0, 120)}`);
             } else {
+              weixinDeliveryNote = "weixin secret missing";
               await progress("weixin secret missing");
             }
           } catch (err) {
+            weixinDeliveryNote = `weixin not confirmed: ${(err instanceof Error ? err.message : String(err)).slice(0, 100)}`;
             await progress(`weixin send failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}`);
           }
         }
       }
     }
-    if (deliveredViaWeixin) {
-      if (shortcutStoragePath) {
-        await fetch(`${supabaseUrl}/storage/v1/object/shortcut-command-media/${shortcutStoragePath}`, {
-          method: "DELETE",
-          headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
-        }).catch(() => undefined);
-      }
-      await deliverDeferredShortcut();
-      await writeShortcutDeliveryDiagnostic();
-      await finish("done", `sent via weixin${shortcutActionNote ? `, ${shortcutActionNote}` : ""}`);
-      return;
-    }
-
     if (!(await stillOwnsJob())) return;
     await progress(`llm ok, ${rawText.length} chars${deliverAsCall ? ", call" : ""}`);
+    // WeChat's outgoing history is already mirrored into Float. Do not create
+    // another history row, but always continue to the independent Web Push path.
+    if (!deliveredViaWeixin) {
     const outboxResponse = await rest("push_outbox", {
       method: "POST",
       body: JSON.stringify([{
@@ -1197,6 +1191,7 @@ Deno.serve(async (req: Request) => {
       const detail = await outboxResponse.text().catch(() => "");
       await finish("failed", `outbox write failed: ${detail.slice(0, 180) || outboxResponse.status}`);
       return;
+    }
     }
     await progress("outbox written, pushing");
 
@@ -1335,7 +1330,7 @@ Deno.serve(async (req: Request) => {
       }).catch(() => undefined);
     }
 
-    await finish("done", `generated, pushed ${pushed}${shortcutActionNote ? `, ${shortcutActionNote}` : ""}${pushErrors.length ? `, errors: ${pushErrors.slice(0, 3).join(" | ")}` : ""}`);
+    await finish("done", `generated, pushed ${pushed}${weixinDeliveryNote ? `, ${weixinDeliveryNote}` : ""}${shortcutActionNote ? `, ${shortcutActionNote}` : ""}${pushErrors.length ? `, errors: ${pushErrors.slice(0, 3).join(" | ")}` : ""}`);
   } catch (err) {
     await finish("failed", err instanceof Error ? err.message : String(err));
   }

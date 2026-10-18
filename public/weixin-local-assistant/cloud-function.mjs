@@ -24,7 +24,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 
 // 云函数动态核心协议版本。wrapper 只加载版本一致的桶内核心，避免站点更新后
 // 继续执行旧桶里不认识微信快捷动作续跑的代码。
-export const WEIXIN_CORE_PROTOCOL_VERSION = 5;
+export const WEIXIN_CORE_PROTOCOL_VERSION = 6;
 export const DEFAULT_BUCKET = "ai-phone-backup";
 export const DEFAULT_INTERVAL_SECONDS = 5;
 const INDEX_PATH = "weixin-cloud/index.json";
@@ -2004,7 +2004,9 @@ export async function sendProactiveText(env, botId, text, replyAnchor, options) 
   let sent = 0;
   for (const part of parts) {
     const data = await sendIlinkTextMessage(botToken, raw, part);
-    const errorCode = typeof data?.error_code === "number" && data.error_code !== 0 ? data.error_code : undefined;
+    const errorCode = [data?.ret, data?.errcode, data?.error_code]
+      .filter(value => value !== undefined && value !== null && value !== "")
+      .map(Number).find(value => Number.isFinite(value) && value !== 0);
     if (errorCode !== undefined) {
       if (sent === 0) throw new Error(`ilink error_code ${errorCode}`);
       break;
@@ -2329,7 +2331,7 @@ const CLOUD_CRON_SECRET_PATH = "weixin-cloud/cron-secret.json";
 const CLOUD_ASSISTANT_STATE_PATH = "weixin-cloud/state/cloud-assistant.json";
 const CLOUD_CRON_JOB_NAME = "ai-phone-weixin-assistant";
 const CLOUD_CORE_CODE_PATH = "weixin-cloud/function-core.mjs";
-const REQUIRED_BUCKET_CORE_PROTOCOL_VERSION = 5;
+const REQUIRED_BUCKET_CORE_PROTOCOL_VERSION = 6;
 
 // ── 自更新加载器 ──
 // 小手机同步运行包时会把最新的 assistant-core.mjs 上传到桶里；这里每次运行
