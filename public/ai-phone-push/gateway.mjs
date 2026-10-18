@@ -33,7 +33,7 @@ type PushConfigRow = {
 type EncryptedPayload = { v: 1; iv: string; tag: string; ct: string };
 
 const OWNER_ID = "owner";
-const MAX_PAYLOAD_BYTES = 900_000;
+const MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
 const ALLOWED_JOB_KINDS = new Set(["followup", "reply_bailout", "reply_once", "timed_task", "shortcut_resume"]);
 const SHORTCUT_RESULT_MODES = new Set(["none", "text", "image"]);
 const SHORTCUT_MAX_ARGS_BYTES = 16_000;
@@ -646,7 +646,7 @@ Deno.serve(async (request: Request) => {
       delete payload.shortcutContinuation;
       delete payload.shortcut;
       const plainJson = JSON.stringify(payload);
-      if (plainJson.length > MAX_PAYLOAD_BYTES) return json({ ok: false, error: "快照过大。" }, 413);
+      if (new TextEncoder().encode(plainJson).byteLength > MAX_PAYLOAD_BYTES) return json({ ok: false, error: "快照超过 4 MiB。" }, 413);
       const config = await loadConfig();
       if (!config.payload_key) throw new Error("每日规则加密密钥未初始化。");
       const encrypted = await encryptPayload(plainJson, config.payload_key);
@@ -688,13 +688,13 @@ Deno.serve(async (request: Request) => {
         }
         if (!body.payload || typeof body.payload !== "object") return json({ ok: false, error: "缺少 payload。" }, 400);
         const plainJson = JSON.stringify(body.payload);
-        if (plainJson.length > MAX_PAYLOAD_BYTES) return json({ ok: false, error: "快照过大。" }, 413);
+        if (new TextEncoder().encode(plainJson).byteLength > MAX_PAYLOAD_BYTES) return json({ ok: false, error: "快照超过 4 MiB。" }, 413);
         const config = await loadConfig();
         if (!config.payload_key) throw new Error("预约加密密钥初始化失败。");
         if (kind === "reply_once") {
           // Never replace a paid/running/failed task for the same input. The unique
           // (owner, trigger_key) index arbitrates simultaneous submissions too.
-          await readJson(await rest("push_jobs", {
+          await readJson(await rest("push_jobs?on_conflict=user_id,trigger_key", {
             method: "POST",
             headers: { Prefer: "resolution=ignore-duplicates,return=representation" },
             body: JSON.stringify([{
@@ -993,7 +993,7 @@ $CRON$)`);
         const ruleId = cleanText(snapshot?.ruleId, 100);
         if (!ruleId || !snapshot?.payload || typeof snapshot.payload !== "object") continue;
         const plainJson = JSON.stringify(snapshot.payload);
-        if (plainJson.length > MAX_PAYLOAD_BYTES) continue;
+        if (new TextEncoder().encode(plainJson).byteLength > MAX_PAYLOAD_BYTES) continue;
         await readJson(await rest(
           `push_bridge_snapshots?user_id=eq.${OWNER_ID}&rule_id=eq.${encodeURIComponent(ruleId)}`,
           { method: "DELETE", headers: { Prefer: "return=representation" } },

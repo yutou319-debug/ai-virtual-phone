@@ -3030,14 +3030,27 @@ async function executeTimedWakeTool(call: ToolCall, context?: ToolExecutionConte
         intent,
     };
     saveTimedWakeSchedule(schedule);
-    // 离线推送兜底：到点时 App 被杀也能由服务端接管生成（动态引入避免模块环）
-    void import("./push-bailout-client").then(m => m.armTimedWakeBailout(schedule)).catch(() => undefined);
+    // Do not claim offline scheduling before the server has acknowledged it.
+    // Keep the local schedule when cloud registration fails, but disclose that
+    // it needs the app to remain active. A lost ACK must not trigger a retry.
+    let cloudConfirmed = false;
+    try {
+        const cloud = await import("./push-bailout-client");
+        cloudConfirmed = (await cloud.armTimedWakeBailout(schedule)).ok;
+    } catch {
+        // Local scheduling still exists; cloud delivery is unconfirmed.
+    }
+    const deliveryNotice = cloudConfirmed
+        ? "云端已确认预约；关闭页面后仍可由云端处理。"
+        : "云端预约未确认，仅保存了本机定时；需要保持 Float 页面运行，离线送达不能保证。";
 
     return {
         name: "稍后主动联系",
         success: true,
-        data: `已设置稍后主动联系：约 ${delayMinutes} 分钟后到点。\n目的：${intent}`,
-        userNotice: `已设置 ${delayMinutes} 分钟后主动联系`,
+        data: `已设置稍后主动联系：约 ${delayMinutes} 分钟后到点。\n目的：${intent}\n${deliveryNotice}`,
+        userNotice: cloudConfirmed
+            ? `云端已确认：${delayMinutes} 分钟后主动联系`
+            : `仅本机定时：${delayMinutes} 分钟后；云端预约未确认`,
     };
 }
 

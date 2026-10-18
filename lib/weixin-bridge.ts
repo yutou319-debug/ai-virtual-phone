@@ -12,9 +12,11 @@ import { getStatusRegionConfig, isCustomStatusRegionActive } from "./chat-status
 import { splitBilingualText } from "./bilingual-text";
 import { resolveVoiceConfig, synthesizeSpeech } from "./tts-service";
 import { formatShoppingPaymentRequestHistory } from "./shopping-payment-request";
+import { resolveCustomStickerMap } from "./custom-sticker-storage";
 
 // ── iLink 实际消息格式 ────────────────────────────────────────
 type ILinkTextItem = { type: 1; text_item: { text: string } };
+type ILinkVoiceItem = { type: 3; voice_item?: { text?: unknown } };
 type ILinkItem = ILinkTextItem | { type: number; [key: string]: unknown };
 
 type ILinkMessage = {
@@ -758,7 +760,7 @@ async function renderMediaCard(part: ParsedMessagePart, charName: string): Promi
         case "music":
         case "music_share": return renderMusicShareCard(part);
         case "xiaohongshu_note_share": return renderXiaohongshuShareCard(part);
-        case "sticker": return renderStickerPlaceholder(part);
+        case "sticker": return null;
         default: return null;
     }
 }
@@ -766,6 +768,22 @@ async function renderMediaCard(part: ParsedMessagePart, charName: string): Promi
 async function partToWeixinOutgoing(part: ParsedMessagePart, charName: string, characterId: string): Promise<WeixinOutgoing | null> {
     const directImage = cleanText(part.mediaData?.stickerUrl);
     if (directImage.startsWith("data:image/")) return { kind: "image", imageDataUrl: directImage };
+    if (part.mediaType === "sticker") {
+        if (!/^https?:\/\//i.test(directImage)) return null;
+        try {
+            const response = await fetch(directImage);
+            if (!response.ok) return null;
+            const blob = await response.blob();
+            if (!blob.type.startsWith("image/")) return null;
+            const imageDataUrl = await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(String(reader.result || ""));
+                reader.onerror = () => reject(reader.error);
+                reader.readAsDataURL(blob);
+            });
+            return imageDataUrl.startsWith("data:image/") ? { kind: "image", imageDataUrl } : null;
+        } catch { return null; }
+    }
     if (part.mediaType === "audio") {
         const transcript = getVoiceTranscript(part);
         const speechText = getVoiceSpeechText(transcript);
@@ -857,15 +875,24 @@ export async function pollQrCodeStatus(qrcode: string): Promise<QrStatusResponse
 }
 
 // ── 处理一条来自微信的消息 ────────────────────────────────────
+function extractIncomingText(msg: ILinkMessage): string {
+    const items = Array.isArray(msg?.item_list) ? msg.item_list : [];
+    const parts: string[] = [];
+    for (const item of items) {
+        // Use iLink's optional transcript without an additional ASR request.
+        const value = item?.type === 1 ? (item as ILinkTextItem).text_item?.text
+            : item?.type === 3 ? (item as ILinkVoiceItem).voice_item?.text : undefined;
+        if (typeof value === "string" && value.trim()) parts.push(value.trim());
+    }
+    return parts.join("\n");
+}
+
 async function handleIncomingMessage(
     bot: WeixinBotConfig,
     msg: ILinkMessage,
 ): Promise<void> {
-    const textItem = msg.item_list?.find((i): i is ILinkTextItem => i.type === 1);
-    if (!textItem || !msg.from_user_id || !msg.context_token) return;
-
-    const userContent = textItem.text_item.text.trim();
-    if (!userContent) return;
+    const userContent = extractIncomingText(msg);
+    if (!userContent || !msg.from_user_id || !msg.context_token) return;
 
     const session = createOrGetSession(bot.characterId);
     const history = loadChatMessages(session.id);
@@ -958,7 +985,16 @@ async function handleIncomingMessage(
 
     const visibleParts: ParsedMessagePart[] = [];
     const weixinOutbox: WeixinOutgoing[] = [];
+    const stickerMap = parts.some(p => p.mediaType === "sticker")
+        ? await resolveCustomStickerMap(bot.characterId).catch(() => ({} as Record<string, string>))
+        : {};
     for (const p of parts) {
+        if (p.mediaType === "sticker") {
+            const label = cleanText(p.mediaData?.label);
+            const key = Object.keys(stickerMap).find(name => name.trim() === label);
+            if (!key || !stickerMap[key]?.trim()) continue;
+            p.mediaData = { ...p.mediaData, stickerUrl: stickerMap[key].trim() };
+        }
         const outgoing = await partToWeixinOutgoing(p, charName, bot.characterId);
         if (outgoing) weixinOutbox.push(outgoing);
 

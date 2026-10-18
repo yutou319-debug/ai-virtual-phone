@@ -24,7 +24,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 
 // 云函数动态核心协议版本。wrapper 只加载版本一致的桶内核心，避免站点更新后
 // 继续执行旧桶里不认识微信快捷动作续跑的代码。
-export const WEIXIN_CORE_PROTOCOL_VERSION = 4;
+export const WEIXIN_CORE_PROTOCOL_VERSION = 5;
 export const DEFAULT_BUCKET = "ai-phone-backup";
 export const DEFAULT_INTERVAL_SECONDS = 5;
 const INDEX_PATH = "weixin-cloud/index.json";
@@ -346,7 +346,9 @@ async function autoReplyPendingMessages(env, runtime, options = {}) {
   const stopTyping = await startIlinkTyping(runtime.bot?.botToken, latest.raw);
   try {
     const generation = await generateReply(env, runtime, cloudMessages, pending.map(item => item.message));
-    const shortcutRequest = extractWeixinShortcutRequest(generation.text, generation.shortcutActions);
+    const safeReply = filterUnavailableStickerMarkers(generation.text,
+      runtime?.promptContext?.customStickerMap || runtime?.customStickerMap || {});
+    const shortcutRequest = extractWeixinShortcutRequest(safeReply, generation.shortcutActions);
     const replyText = shortcutRequest.text;
     const replyItems = await buildLocalReplyOutbox(replyText, runtime);
     if (replyItems.length === 0) return { status: "skipped_empty_reply", pending: pending.length, sent: 0 };
@@ -1286,7 +1288,8 @@ async function buildLocalReplyItemsFromSegment(segment, runtime) {
   const before = value.slice(0, media.index).trim();
   const after = value.slice(media.index + media.raw.length).trim();
   if (before) out.push(...await buildLocalReplyItemsFromSegment(before, runtime));
-  out.push(await buildLocalMediaReplyItem(media, runtime));
+  const mediaItem = await buildLocalMediaReplyItem(media, runtime);
+  if (mediaItem) out.push(mediaItem);
   if (after) out.push(...await buildLocalReplyItemsFromSegment(after, runtime));
   return out;
 }
@@ -1347,6 +1350,8 @@ async function buildLocalMediaReplyItem(media, runtime) {
     if (stickerImage) {
       return { kind: "image", imageDataUrl: stickerImage, label: media.raw };
     }
+    // Never substitute a made-up sticker with the generic media template.
+    return null;
   }
   if (media.kind === "photo") {
     const generatedImage = await generateLocalImageReplyDataUrl(media, runtime).catch((err) => {
@@ -1564,9 +1569,24 @@ function resolveRuntimeStickerImage(runtime, name) {
   const label = String(name || "").trim();
   if (!label) return "";
   const map = runtime?.promptContext?.customStickerMap || runtime?.customStickerMap || {};
-  if (typeof map[label] === "string" && map[label].trim()) return map[label].trim();
+  if (Object.hasOwn(map, label) && typeof map[label] === "string" && map[label].trim()) return map[label].trim();
   const foundKey = Object.keys(map).find(key => key.trim() === label);
   return foundKey && typeof map[foundKey] === "string" ? map[foundKey].trim() : "";
+}
+
+function filterUnavailableStickerMarkers(text, stickerMap) {
+  const available = new Set(Object.entries(stickerMap || {})
+    .filter(([, value]) => typeof value === "string" && value.trim())
+    .map(([name]) => name.trim()));
+  let removed = false;
+  const cleaned = String(text || "").replace(/\[表情包\s*[：:]\s*([^\]]+)\]/g, (marker, name) => {
+    if (available.has(name.trim())) return marker;
+    removed = true;
+    return "";
+  }).trim();
+  // An invalid-sticker-only reply still needs an acknowledgement so it is not
+  // generated again by the next poll. This fallback is plain text, never an image.
+  return cleaned || (removed ? "这张表情包暂时发不了。" : "");
 }
 
 function cleanVoiceTranscript(text) {
@@ -2148,13 +2168,15 @@ function messageTime(message) {
 
 function extractText(raw) {
   const items = Array.isArray(raw?.item_list) ? raw.item_list : [];
+  const parts = [];
   for (const item of items) {
-    if (item?.type === 1 && typeof item.text_item?.text === "string") {
-      const text = item.text_item.text.trim();
-      if (text) return text;
-    }
+    // iLink may supply a transcript on voice_item.text; it is optional.
+    // Read only message content, never quoted ref_msg or arbitrary media fields.
+    const value = item?.type === 1 ? item.text_item?.text
+      : item?.type === 3 ? item.voice_item?.text : undefined;
+    if (typeof value === "string" && value.trim()) parts.push(value.trim());
   }
-  return "";
+  return parts.join("\n");
 }
 
 function imageDataUrlToBuffer(dataUrl) {
@@ -2307,7 +2329,7 @@ const CLOUD_CRON_SECRET_PATH = "weixin-cloud/cron-secret.json";
 const CLOUD_ASSISTANT_STATE_PATH = "weixin-cloud/state/cloud-assistant.json";
 const CLOUD_CRON_JOB_NAME = "ai-phone-weixin-assistant";
 const CLOUD_CORE_CODE_PATH = "weixin-cloud/function-core.mjs";
-const REQUIRED_BUCKET_CORE_PROTOCOL_VERSION = 4;
+const REQUIRED_BUCKET_CORE_PROTOCOL_VERSION = 5;
 
 // ── 自更新加载器 ──
 // 小手机同步运行包时会把最新的 assistant-core.mjs 上传到桶里；这里每次运行

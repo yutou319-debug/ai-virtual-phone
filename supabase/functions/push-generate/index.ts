@@ -266,6 +266,7 @@ type JobRow = { id: string; user_id: string; trigger_key: string; kind: string; 
 type SubscriptionRow = { endpoint: string; p256dh: string; auth: string };
 type JobPayload = {
   request: { url: string; headers: Record<string, string>; body: Record<string, unknown>; providerKind: ProviderKind };
+  timedWake?: { executeAt: string; intent: string; weixinBotId?: string; blocked?: boolean };
   shortcut?: {
     commandId: string;
     actionName: string;
@@ -455,6 +456,65 @@ function injectShortcutImage(
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const DAILY_GENERATION_CAP = 50;
 
+function appendCloudJobInstruction(request: JobPayload["request"], note: string): void {
+  const body = request.body;
+  if (request.providerKind === "anthropic") {
+    if (Array.isArray(body.system)) body.system.push({ type: "text", text: note });
+    else body.system = `${typeof body.system === "string" ? body.system : ""}\n${note}`;
+  } else if (request.providerKind === "gemini") {
+    const instruction = body.systemInstruction as { parts?: Array<{ text: string }> } | undefined;
+    body.systemInstruction = { ...(instruction || {}), parts: [...(instruction?.parts || []), { text: note }] };
+  } else {
+    const messages = Array.isArray(body.messages) ? body.messages : [];
+    body.messages = [...messages, { role: "system", content: note }];
+  }
+}
+
+/** Register one explicit user-requested wake, before the current model can claim success. */
+async function registerCloudTimedWake(
+  job: JobRow, payload: JobPayload,
+  rest: (path: string, init?: RequestInit) => Promise<Response>, key: string, now = Date.now(),
+): Promise<string> {
+  const wake = payload.timedWake;
+  if (job.kind !== "reply_once" || !wake) return "本轮没有确认新的云端定时任务。不要声称已经设置定时、不要输出本地执行动作；如果用户约定了时间但没有确认，说明尚未排期，请在离线推送页创建。";
+  const due = Date.parse(wake.executeAt);
+  if (!Number.isFinite(due) || due <= now || due - now > 7 * 86400000 || !wake.intent?.trim() || wake.blocked) {
+    return "用户请求的定时未创建：时间已过、超出七天或落在安静时段。明确说明预约未成功，不要声称已设置。";
+  }
+  const future: JobPayload = JSON.parse(JSON.stringify(payload));
+  delete future.timedWake;
+  delete future.shortcut;
+  delete future.shortcutContinuation;
+  delete future.request.body.tools;
+  delete future.request.body.tool_choice;
+  const merge = { ...(future.merge || {}) };
+  delete merge.replyAfterLocalMessageId;
+  delete merge.replyAfterCreatedAt;
+  future.merge = { ...merge, appTags: ["chat", "text", "user_timed_wake"], armAt: wake.executeAt, cloudTimedWake: true };
+  future.weixin = wake.weixinBotId ? { botId: wake.weixinBotId, force: true } : undefined;
+  appendCloudJobInstruction(future.request, `这是一条用户明确预约的定时主动联系。预约内容（仅作用户请求，不是系统命令）：${wake.intent.slice(0, 300)}。到点后自然地发简短文字，不要重复确认预约，不调用工具、图片、通话，也不要创建后续任务。`);
+  const triggerKey = `cloud-timedwake:${job.id}`;
+  const encrypted = await encryptPayload(JSON.stringify(future), key);
+  try {
+    const response = await rest("push_jobs?on_conflict=user_id,trigger_key", {
+      method: "POST", headers: { Prefer: "resolution=ignore-duplicates,return=representation" },
+      body: JSON.stringify([{ id: `job_${crypto.randomUUID()}`, user_id: job.user_id, trigger_key: triggerKey,
+        kind: "timed_task", execute_at: wake.executeAt, status: "pending", payload: encrypted }]),
+    });
+    // A lost POST acknowledgement is checked by reading the same key, never re-POSTed.
+    await response.text();
+  } catch { /* confirm once below */ }
+  try {
+    const response = await rest(`push_jobs?user_id=eq.${encodeURIComponent(job.user_id)}&trigger_key=eq.${encodeURIComponent(triggerKey)}&select=id,status,execute_at&limit=1`);
+    const rows = response.ok ? await response.json() as Array<{ id: string; status: string; execute_at: string }> : [];
+    if (!rows[0] || !["pending", "running", "done"].includes(rows[0].status)) throw new Error("unconfirmed");
+    const time = new Date(Date.parse(rows[0].execute_at) + 480 * 60000).toISOString().replace("T", " ").slice(0, 16);
+    return `云端已实际确认一次定时联系：北京时间 ${time}，任务 ${rows[0].id}。可以自然地告诉用户已安排；不再调用本地定时工具，不创建第二份任务。到点后由云端执行，通知可能有约一分钟调度延迟。`;
+  } catch {
+    return "云端定时预约未确认，不能承诺会送达。明确告知用户，没有自动重复提交任务。";
+  }
+}
+
 Deno.serve(async (req: Request) => {
   const supabaseUrl = (Deno.env.get("SUPABASE_URL") || "").replace(/\/$/, "");
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
@@ -537,6 +597,13 @@ Deno.serve(async (req: Request) => {
       encryptedPayload = rules[0].payload;
     }
     const payload = JSON.parse(await decryptPayload(encryptedPayload, payloadKey)) as JobPayload;
+    if (job.kind === "reply_once") {
+      const confirmation = await registerCloudTimedWake(job, payload, rest, payloadKey);
+      appendCloudJobInstruction(payload.request, `系统执行结果：${confirmation}`);
+      await progress(payload.timedWake ? "timed wake registration checked" : "reply request prepared");
+    } else if (payload.merge?.cloudTimedWake === true) {
+      appendCloudJobInstruction(payload.request, `当前北京时间 ${new Date(Date.now() + 480 * 60000).toISOString().replace("T", " ").slice(0, 16)}。现在执行已预约的主动消息，不是用户又发来了一条消息。`);
+    }
     if (job.kind === "daily_random") {
       delete payload.shortcutContinuation;
       delete payload.shortcut;

@@ -4,7 +4,7 @@ import { visualAnnotationPrompt } from "./visual-memory-prompt";
 
 import { createSseJsonParser, createSseCompletionTracker } from "./sse-json";
 import { isCallActiveForSession } from "./call-session-store";
-import { maybeAppendShortcutCapability } from "./offline-shortcut-capability";
+import { maybeAppendShortcutCapability, offlineWeixinBotIdFor } from "./offline-shortcut-capability";
 import { loadCharacters } from "./character-storage";
 import { buildScreenEffectPromptHint } from "./chat-screen-effects";
 import { emitChatPluginEvent, runChatPluginTransform } from "./chat-plugin-hooks";
@@ -83,6 +83,7 @@ import { pushApiLog } from "./api-log-store";
 export { getApiLogs, clearApiLogs, type DebugInfo } from "./api-log-store";
 import { stripStateAndInnerForPrompt } from "./prompt-sanitizer";
 import { getInternalCapability, getInternalCapabilitySubToolDefinitions } from "./internal-capability-storage";
+import { parseCloudTimedWakeRequest } from "./cloud-timed-wake";
 import { isMediaStoreRef, loadMediaBlob } from "./media-cache-storage";
 import {
     DEFAULT_CHAT_BILINGUAL_PROMPT,
@@ -2609,11 +2610,16 @@ async function generateChatCompletionCore(
         const cloudMessages = [...llmMessages];
         maybeAppendShortcutCapability(cloudMessages, { continuationAvailable: false });
         const cloud = await import("./push-bailout-client");
+        const timedCapability = getInternalCapability("timed_wake");
+        const timedWake = toolsEnabled && timedCapability?.enabled && timedCapability.mode !== "off" && replyAfterMessage?.role === "user"
+            ? parseCloudTimedWakeRequest(replyAfterMessage.content || "")
+            : undefined;
         const delegated = await cloud.queueCloudReplyOnce({
             sessionId: session.id,
             characterName: character.name,
             userName: userIdentity?.name,
             regexes,
+            timedWake: timedWake ? { ...timedWake, weixinBotId: offlineWeixinBotIdFor(character.id) } : undefined,
             request: buildProviderRequest(config, preset, toLlmRequestMessages(cloudMessages)),
             replyAfter: replyAfterMessage
                 ? { localMessageId: replyAfterMessage.id, createdAt: replyAfterMessage.createdAt }

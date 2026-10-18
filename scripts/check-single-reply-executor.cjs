@@ -9,7 +9,11 @@ const jobs=new Map(),byId=new Map();let paidCalls=0;
 const rest=async(path,init={})=>{
  if(init.method==='POST'){
   if(!init.headers.Prefer.includes('ignore-duplicates'))throw Error('replace would duplicate');
-  const row=JSON.parse(init.body)[0];if(!jobs.has(row.trigger_key)){jobs.set(row.trigger_key,row);byId.set(row.id,row)}return new Response('[]');
+  const row=JSON.parse(init.body)[0];
+  // PostgREST defaults to the primary key (id). A fresh UUID with the same
+  // (owner, trigger_key) otherwise raises 23505, rather than ignoring it.
+  if(jobs.has(row.trigger_key)&&new URLSearchParams(path.split('?')[1]).get('on_conflict')!=='user_id,trigger_key')return new Response('{"code":"23505"}',{status:409});
+  if(!jobs.has(row.trigger_key)){jobs.set(row.trigger_key,row);byId.set(row.id,row)}return new Response('[]');
  }
  const key=decodeURIComponent(path.match(/trigger_key=eq.([^&]+)/)[1]);return new Response(JSON.stringify(jobs.has(key)?[jobs.get(key)]:[]));
 };
@@ -35,6 +39,10 @@ const params={sessionId:'s',characterName:'name',regexes:[],request:{url:'x',hea
   let threw=false;try{await c(params)}catch{threw=true}if(!threw||requests>(mode==='failed'?2:1))throw Error(mode+' fallback/retry');
  }
  const disabled=clientFactory(()=>false,async()=>true,async()=>{throw Error('unexpected request')},async()=>{}, {hidden:false},setTimeout,clearTimeout);
+ let oversizedRequests=0;
+ const oversized=clientFactory(()=>true,async()=>true,async()=>{oversizedRequests++;return new Response('{"error":"快照过大。"}',{status:413})},async()=>{throw Error('must not poll/import an uncreated task')},{hidden:false},setTimeout,clearTimeout);
+ let oversizedError;try{await oversized(params)}catch(error){oversizedError=error}
+ if(oversizedRequests!==1||!oversizedError?.message.includes('HTTP 413')||!oversizedError.message.includes('无需重新部署'))throw Error('oversized request misdiagnosed or retried');
  if(await disabled(params))throw Error('offline cloud used when disabled');
  console.log('PASS: 20 concurrent submissions -> 1 paid execution; completed/failed input never regenerated; new input runs; client completion imports once; lost ACK, legacy cloud and API failure fail closed; inactive cloud remains local.');
 })().catch(e=>{console.error(e);process.exit(1)});
@@ -44,10 +52,10 @@ const coreStart=engine.indexOf('async function generateChatCompletionCore(');
 const coreEnd=engine.indexOf('    if (toolsEnabled && nativeToolProtocolForConfig',coreStart);
 let core=engine.slice(coreStart,coreEnd)+'\n return "local";\n}';
 core=core.replace('await import("./push-bailout-client")','cloudModule');
-const makeCore=new Function('buildChatPromptMessages','mergeAppTags','maybeAppendShortcutCapability','cloudModule','buildProviderRequest','toLlmRequestMessages',transpile(core)+';return generateChatCompletionCore;');
+const makeCore=new Function('buildChatPromptMessages','mergeAppTags','maybeAppendShortcutCapability','cloudModule','buildProviderRequest','toLlmRequestMessages','getInternalCapability','parseCloudTimedWakeRequest','offlineWeixinBotIdFor',transpile(core)+';return generateChatCompletionCore;');
 (async()=>{
  for(const decision of ['cloud','uncertain','local']){
-  const run=makeCore(async()=>({llmMessages:[],character:{name:'n'},config:{},preset:{},regexes:[],userIdentity:{},toolsEnabled:false}),()=>[],()=>{}, {queueCloudReplyOnce:async()=>{if(decision==='uncertain')throw Error('lost acknowledgement');return decision==='cloud'}},()=>({}),x=>x);
+  const run=makeCore(async()=>({llmMessages:[],character:{name:'n'},config:{},preset:{},regexes:[],userIdentity:{},toolsEnabled:false}),()=>[],()=>{}, {queueCloudReplyOnce:async()=>{if(decision==='uncertain')throw Error('lost acknowledgement');return decision==='cloud'}},()=>({}),x=>x,()=>undefined,()=>undefined,()=> '');
   let result,error;try{result=await run({id:'s',isGroup:false},[{id:'m',sessionId:'s',role:'user',createdAt:'date'}],{}, {}, {})}catch(e){error=e}
   if(decision==='local'&&result!=='local')throw Error('inactive cloud did not continue');
   if(decision!=='local'&&result==='local')throw Error('local provider reached after cloud submission');

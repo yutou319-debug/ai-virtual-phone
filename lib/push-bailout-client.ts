@@ -32,6 +32,7 @@ import { dailyContactMinutes, loadDailyContactRules, type DailyContactRule } fro
 import { loadCharacters } from "./character-storage";
 import type { RegexConfig } from "./settings-types";
 import type { LLMMessage } from "./llm-prompt-assembler";
+import type { CloudTimedWakeRequest } from "./cloud-timed-wake";
 
 // ── 离线来电：让 AI 自己决定"这条主动消息要不要改成打电话" ──────────
 // 只在主动类离线任务（冷场重连/定时唤醒）的生成快照里注入一句能力说明；
@@ -132,6 +133,7 @@ export async function armReplyBailout(params: {
     /** 云回复必须排在这条本地输入之后；跨设备排序不能只依赖两边时钟。 */
     replyAfter?: { localMessageId: string; createdAt: string };
     signal?: AbortSignal;
+    timedWake?: CloudTimedWakeRequest;
 }): Promise<ReplyBailoutHandle | null> {
     if (!bailoutEnabled()) return null;
     if (!(await hasAccountPushSubscription())) return null;
@@ -243,6 +245,10 @@ export async function queueCloudReplyOnce(params: Parameters<typeof armReplyBail
             executeAt: new Date().toISOString(),
             payload: {
                 request: params.request,
+                timedWake: params.timedWake ? {
+                    ...params.timedWake,
+                    blocked: isWithinPushQuietHours(Date.parse(params.timedWake.executeAt)),
+                } : undefined,
                 notify: { title: params.characterName, url: "/" },
                 merge: {
                     sessionId: params.sessionId,
@@ -258,8 +264,11 @@ export async function queueCloudReplyOnce(params: Parameters<typeof armReplyBail
             },
         }),
     }).catch(() => null);
+    if (response?.status === 413) {
+        throw new Error("聊天请求过大，云端拒绝接收（HTTP 413）。请减少传入历史/图片数量或关闭图片细节增强后重试；本次没有改用手机生成，无需重新部署。");
+    }
     if (!response?.ok) {
-        throw new Error("单次云端回复提交未确认。请确认已重新部署个人离线推送；为避免重复扣费，没有改用手机再次生成。");
+        throw new Error(`单次云端回复提交未确认${response ? `（HTTP ${response.status}）` : "（网络连接失败）"}；为避免重复扣费，没有改用手机再次生成。`);
     }
     const queued = await response.json() as { jobId?: string; singleExecutor?: boolean };
     if (!queued.jobId || queued.singleExecutor !== true) {
