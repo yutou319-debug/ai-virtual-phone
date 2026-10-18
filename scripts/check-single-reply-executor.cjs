@@ -35,6 +35,10 @@ const params={sessionId:'s',characterName:'name',regexes:[],request:{url:'x',hea
   let threw=false;try{await c(params)}catch{threw=true}if(!threw||requests>(mode==='failed'?2:1))throw Error(mode+' fallback/retry');
  }
  const disabled=clientFactory(()=>false,async()=>true,async()=>{throw Error('unexpected request')},async()=>{}, {hidden:false},setTimeout,clearTimeout);
+ let oversizedRequests=0;
+ const oversized=clientFactory(()=>true,async()=>true,async()=>{oversizedRequests++;return new Response('{"error":"快照过大。"}',{status:413})},async()=>{throw Error('must not poll/import an uncreated task')},{hidden:false},setTimeout,clearTimeout);
+ let oversizedError;try{await oversized(params)}catch(error){oversizedError=error}
+ if(oversizedRequests!==1||!oversizedError?.message.includes('HTTP 413')||!oversizedError.message.includes('无需重新部署'))throw Error('oversized request misdiagnosed or retried');
  if(await disabled(params))throw Error('offline cloud used when disabled');
  console.log('PASS: 20 concurrent submissions -> 1 paid execution; completed/failed input never regenerated; new input runs; client completion imports once; lost ACK, legacy cloud and API failure fail closed; inactive cloud remains local.');
 })().catch(e=>{console.error(e);process.exit(1)});

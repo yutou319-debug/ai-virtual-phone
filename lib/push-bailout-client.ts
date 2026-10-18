@@ -258,8 +258,11 @@ export async function queueCloudReplyOnce(params: Parameters<typeof armReplyBail
             },
         }),
     }).catch(() => null);
+    if (response?.status === 413) {
+        throw new Error("聊天请求过大，云端拒绝接收（HTTP 413）。请减少传入历史/图片数量或关闭图片细节增强后重试；本次没有改用手机生成，无需重新部署。");
+    }
     if (!response?.ok) {
-        throw new Error("单次云端回复提交未确认。请确认已重新部署个人离线推送；为避免重复扣费，没有改用手机再次生成。");
+        throw new Error(`单次云端回复提交未确认${response ? `（HTTP ${response.status}）` : "（网络连接失败）"}；为避免重复扣费，没有改用手机再次生成。`);
     }
     const queued = await response.json() as { jobId?: string; singleExecutor?: boolean };
     if (!queued.jobId || queued.singleExecutor !== true) {
