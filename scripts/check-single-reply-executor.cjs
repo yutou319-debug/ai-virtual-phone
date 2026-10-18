@@ -9,7 +9,11 @@ const jobs=new Map(),byId=new Map();let paidCalls=0;
 const rest=async(path,init={})=>{
  if(init.method==='POST'){
   if(!init.headers.Prefer.includes('ignore-duplicates'))throw Error('replace would duplicate');
-  const row=JSON.parse(init.body)[0];if(!jobs.has(row.trigger_key)){jobs.set(row.trigger_key,row);byId.set(row.id,row)}return new Response('[]');
+  const row=JSON.parse(init.body)[0];
+  // PostgREST defaults to the primary key (id). A fresh UUID with the same
+  // (owner, trigger_key) otherwise raises 23505, rather than ignoring it.
+  if(jobs.has(row.trigger_key)&&new URLSearchParams(path.split('?')[1]).get('on_conflict')!=='user_id,trigger_key')return new Response('{"code":"23505"}',{status:409});
+  if(!jobs.has(row.trigger_key)){jobs.set(row.trigger_key,row);byId.set(row.id,row)}return new Response('[]');
  }
  const key=decodeURIComponent(path.match(/trigger_key=eq.([^&]+)/)[1]);return new Response(JSON.stringify(jobs.has(key)?[jobs.get(key)]:[]));
 };

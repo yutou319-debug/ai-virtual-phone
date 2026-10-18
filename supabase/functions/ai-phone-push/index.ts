@@ -694,7 +694,7 @@ Deno.serve(async (request: Request) => {
         if (kind === "reply_once") {
           // Never replace a paid/running/failed task for the same input. The unique
           // (owner, trigger_key) index arbitrates simultaneous submissions too.
-          await readJson(await rest("push_jobs", {
+          await readJson(await rest("push_jobs?on_conflict=user_id,trigger_key", {
             method: "POST",
             headers: { Prefer: "resolution=ignore-duplicates,return=representation" },
             body: JSON.stringify([{
