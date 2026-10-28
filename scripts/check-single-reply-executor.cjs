@@ -20,9 +20,11 @@ const rest=async(path,init={})=>{
 const fetch=async(_,init)=>{const row=byId.get(JSON.parse(init.body).jobId);if(row.status==='pending'){row.status='running';paidCalls++;await Promise.resolve();row.status='done'}return new Response('accepted')};
 const send=key=>gateway('reply_once',rest,async r=>{if(!r.ok)throw Error();return r.json()},{payload_key:'secret',cron_secret:'cron'},'{}','owner',key,async()=>({}), 'https://example.test',x=>x,fetch);
 const clientSrc=fs.readFileSync('lib/push-bailout-client.ts','utf8');
-let body=clientSrc.slice(clientSrc.indexOf('export async function queueCloudReplyOnce'),clientSrc.indexOf('async function deleteBailoutJob'));
-body=body.replace('export async function','async function').replace('await import("./push-outbox-client")','{ consumeServerOutbox: consume }');
-const clientFactory=new Function('bailoutEnabled','hasAccountPushSubscription','pushJobsFetch','consume','document','setTimeout','clearTimeout',transpile(body)+';return queueCloudReplyOnce;');
+let body=clientSrc.slice(clientSrc.indexOf('const PHONE_REPLY_MODE_KEY'),clientSrc.indexOf('async function deleteBailoutJob'));
+body=body.replaceAll('export ', '').replace('await import("./push-outbox-client")','{ consumeServerOutbox: consume }');
+const rawClientFactory=new Function('bailoutEnabled','hasAccountPushSubscription','pushJobsFetch','consume','document','setTimeout','clearTimeout','kvGet','kvSet','kvRemove','window',transpile(body)+';return queueCloudReplyOnce;');
+const storage=new Map();
+const clientFactory=(...args)=>rawClientFactory(...args,k=>storage.get(k), (k,v)=>storage.set(k,v),k=>storage.delete(k),{dispatchEvent(){}});
 const params={sessionId:'s',characterName:'name',regexes:[],request:{url:'x',headers:{},body:{}},replyAfter:{localMessageId:'m',createdAt:'2026-10-03'}};
 (async()=>{
  const replies=await Promise.all(Array.from({length:20},()=>send('reply-once:s:m')));
@@ -43,6 +45,15 @@ const params={sessionId:'s',characterName:'name',regexes:[],request:{url:'x',hea
  const oversized=clientFactory(()=>true,async()=>true,async()=>{oversizedRequests++;return new Response('{"error":"快照过大。"}',{status:413})},async()=>{throw Error('must not poll/import an uncreated task')},{hidden:false},setTimeout,clearTimeout);
  let oversizedError;try{await oversized(params)}catch(error){oversizedError=error}
  if(oversizedRequests!==1||!oversizedError?.message.includes('HTTP 413')||!oversizedError.message.includes('无需重新部署'))throw Error('oversized request misdiagnosed or retried');
+ storage.clear();
+ const quota=clientFactory(()=>true,async()=>true,async()=>new Response(JSON.stringify({message:'Service for this project is restricted due to exceed_cached_egress_quota'}),{status:402}),async()=>{}, {hidden:false},setTimeout,clearTimeout);
+ let quotaFailed=false;try{await quota(params)}catch{quotaFailed=true}
+ if(!quotaFailed||storage.get('float_phone_reply_mode_v1')!=='true')throw Error('quota must switch mode without replaying current input');
+ let oldBlocked=false;try{await quota(params)}catch{oldBlocked=true}if(!oldBlocked)throw Error('old input replayed');
+ const fresh={...params,replyAfter:{localMessageId:'fresh',createdAt:new Date(Date.now()+1000).toISOString()}};
+ if(await quota(fresh)!==false)throw Error('fresh input did not run locally');
+ storage.set('float_cloud_submission_v1:reply-once:s:fresh','submitted');
+ let uncertainBlocked=false;try{await quota(fresh)}catch{uncertainBlocked=true}if(!uncertainBlocked)throw Error('uncertain submission replayed');
  if(await disabled(params))throw Error('offline cloud used when disabled');
  console.log('PASS: 20 concurrent submissions -> 1 paid execution; completed/failed input never regenerated; new input runs; client completion imports once; lost ACK, legacy cloud and API failure fail closed; inactive cloud remains local.');
 })().catch(e=>{console.error(e);process.exit(1)});

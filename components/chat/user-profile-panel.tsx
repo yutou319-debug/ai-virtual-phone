@@ -1,4 +1,5 @@
 "use client";
+import { isPhoneReplyMode, setPhoneReplyMode } from "@/lib/push-bailout-client";
 
 import { useState, useEffect, useMemo, type CSSProperties } from "react";
 import CSSSchemeBar from "@/components/ui/css-scheme-picker";
@@ -1177,6 +1178,13 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
     const [offlinePushBusy, setOfflinePushBusy] = useState(false);
     const [offlinePushHint, setOfflinePushHint] = useState<string | null>(null);
     const [personalCloudActive, setPersonalCloudActive] = useState(false);
+    const [phoneReplyMode, updatePhoneReplyMode] = useState(false);
+    useEffect(() => {
+        const refresh = () => updatePhoneReplyMode(isPhoneReplyMode());
+        refresh();
+        window.addEventListener("float-reply-mode-change", refresh);
+        return () => window.removeEventListener("float-reply-mode-change", refresh);
+    }, []);
     const [pushCloudScheduled, setPushCloudScheduled] = useState(() => loadPushCloudScheduled());
     const [pushScheduleBusy, setPushScheduleBusy] = useState(false);
     const [pushScheduleHint, setPushScheduleHint] = useState("");
@@ -1431,6 +1439,13 @@ function OfflinePushSettingsPage({ onBack }: { onBack: () => void }) {
                                             )}
                                     </div>
                                 )}
+                                <div className="flex items-center gap-3">
+                                    <div className="flex-1 flex flex-col">
+                                        <span className="menu-label">手机内回复</span>
+                                        <span className="menu-desc !mt-0">临时在本机生成，请保持前台。已提交云端的旧消息不会重复生成；不恢复微信或离线任务。</span>
+                                    </div>
+                                    <Toggle checked={phoneReplyMode} onChange={setPhoneReplyMode} />
+                                </div>
                                 {pushScheduleHint && (
                                     <span className="menu-desc !mt-0">{pushScheduleHint}</span>
                                 )}

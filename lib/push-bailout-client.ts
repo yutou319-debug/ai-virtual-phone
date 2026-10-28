@@ -3,6 +3,7 @@
 // App 被杀则由服务端 cron 到点接管生成并推送。组装用的就是前台同一条
 // buildChatPromptMessages → buildProviderRequest 链路，零新逻辑。
 
+import { kvGet, kvSet, kvRemove } from "./kv-db";
 import { isCallActiveForSession } from "./call-session-store";
 import { bgSetInterval } from "./bg-timer";
 import { buildChatPromptMessages } from "./chat-engine";
@@ -228,6 +229,17 @@ export async function armReplyBailout(params: {
     };
 }
 
+const PHONE_REPLY_MODE_KEY = "float_phone_reply_mode_v1";
+const CLOUD_SUBMISSION_PREFIX = "float_cloud_submission_v1:";
+export function isPhoneReplyMode(): boolean {
+    return typeof window !== "undefined" && kvGet(PHONE_REPLY_MODE_KEY) === "true";
+}
+export function setPhoneReplyMode(enabled: boolean): void {
+    kvSet(PHONE_REPLY_MODE_KEY, String(enabled));
+    if (enabled) kvSet(PHONE_REPLY_MODE_KEY + ":since", new Date().toISOString());
+    window.dispatchEvent(new Event("float-reply-mode-change"));
+}
+
 /** A stable input ID prevents retries/reopens from starting a second paid request. */
 export async function queueCloudReplyOnce(params: Parameters<typeof armReplyBailout>[0]): Promise<boolean> {
     // Subscription/network uncertainty must never switch an active cloud reply to local.
@@ -236,6 +248,14 @@ export async function queueCloudReplyOnce(params: Parameters<typeof armReplyBail
     if (!anchor) throw new Error("无法确认本轮输入标识；为避免重复扣费，未调用模型。");
     if (params.signal?.aborted) throw Object.assign(new Error("已停止等待"), { name: "AbortError" });
     const triggerKey = `reply-once:${params.sessionId}:${anchor}`;
+    const submissionKey = CLOUD_SUBMISSION_PREFIX + triggerKey;
+    const previousSubmission = kvGet(submissionKey);
+    if (isPhoneReplyMode()) {
+        if (previousSubmission || Date.parse(params.replyAfter?.createdAt || "") < Date.parse(kvGet(PHONE_REPLY_MODE_KEY + ":since") || new Date().toISOString())) throw new Error("这是切换前的旧输入或曾提交云端，不能转到手机重复生成；请等待云端结果，或发送一条新消息。");
+        return false;
+    }
+    // Persist before POST: network loss/reload must not turn an uncertain cloud request into local generation.
+    kvSet(submissionKey, "submitted");
     const response = await pushJobsFetch({
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -264,6 +284,15 @@ export async function queueCloudReplyOnce(params: Parameters<typeof armReplyBail
             },
         }),
     }).catch(() => null);
+    if (response?.status === 402 && !previousSubmission) {
+        const restriction = await response.clone().json().catch(() => null) as { message?: string } | null;
+        if (typeof restriction?.message === "string" && restriction.message.includes("Service for this project is restricted")
+            && restriction.message.includes("exceed_cached_egress_quota")) {
+            kvRemove(submissionKey);
+            setPhoneReplyMode(true);
+            throw new Error("个人云流量受限，已开启手机内回复。请发送一条新消息并保持前台；本条没有自动再次生成，以免旧任务重复扣费。");
+        }
+    }
     if (response?.status === 413) {
         throw new Error("聊天请求过大，云端拒绝接收（HTTP 413）。请减少传入历史/图片数量或关闭图片细节增强后重试；本次没有改用手机生成，无需重新部署。");
     }

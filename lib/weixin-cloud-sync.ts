@@ -225,6 +225,7 @@ export type WeixinCloudRuntimeIndexItem = {
   characterName: string;
   sessionId: string;
   path: string;
+  pollPath?: string;
   updatedAt: string;
   messageCount: number;
   memoryCount: number;
@@ -1047,7 +1048,10 @@ export async function syncWeixinBotRuntimeToCloud(
 
   await ensureBucket(cloudConfig);
   await putObject(cloudConfig, path, json, "application/json");
+  const pollPath = `weixin-cloud/poll/${sanitizePathPart(snapshot.bot.id)}.json`;
+  await putObject(cloudConfig, pollPath, JSON.stringify({ bot: { id: snapshot.bot.id, botToken: snapshot.bot.botToken } }), "application/json");
   await updateRuntimeIndex(cloudConfig, {
+    pollPath,
     botId: snapshot.bot.id,
     characterId: snapshot.character.id,
     characterName: snapshot.character.name,

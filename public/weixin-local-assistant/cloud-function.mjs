@@ -24,7 +24,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 
 // 云函数动态核心协议版本。wrapper 只加载版本一致的桶内核心，避免站点更新后
 // 继续执行旧桶里不认识微信快捷动作续跑的代码。
-export const WEIXIN_CORE_PROTOCOL_VERSION = 7;
+export const WEIXIN_CORE_PROTOCOL_VERSION = 8;
 export const DEFAULT_BUCKET = "ai-phone-backup";
 export const DEFAULT_INTERVAL_SECONDS = 5;
 const INDEX_PATH = "weixin-cloud/index.json";
@@ -83,7 +83,7 @@ export async function pollOnce(env, targetBotId, options = {}) {
       skippedForDeadline += 1;
       continue;
     }
-    const runtime = await loadRuntimePackage(env, item);
+    let runtime = await loadPollingRuntime(env, item);
     const state = await loadBotState(env, item.botId);
     const polledAt = new Date().toISOString();
 
@@ -95,6 +95,10 @@ export async function pollOnce(env, targetBotId, options = {}) {
     );
 
     const messages = Array.isArray(data.msgs) ? data.msgs : [];
+    const pendingFlag = await loadPendingFlag(env, item.botId);
+    const needsRuntime = messages.length > 0 || pendingFlag?.pending === true
+      || reconcileScanDue(pendingFlag) || options?.debug === true;
+    if (messages.length > 0) runtime = await loadRuntimePackage(env, item);
     const ilinkErrorCode = typeof data.error_code === "number" && data.error_code !== 0 ? data.error_code : undefined;
     if (ilinkErrorCode !== undefined) {
       console.warn(`[weixin-assistant] getupdates error_code=${ilinkErrorCode} bot=${item.botId} 响应字段=${Object.keys(data).join(",")}`);
@@ -128,7 +132,12 @@ export async function pollOnce(env, targetBotId, options = {}) {
       });
     }
 
-    const autoReply = await autoReplyPendingMessages(env, runtime, { force: options?.debug === true }).catch(async (err) => {
+    const autoReply = await (needsRuntime
+      ? autoReplyPendingMessages(env, runtime, {
+        force: options?.debug === true,
+        loadRuntime: messages.length > 0 ? undefined : () => loadRuntimePackage(env, item),
+      })
+      : Promise.resolve({ status: "idle", pending: 0, sent: 0 })).catch(async (err) => {
       const message = errorMessage(err);
       state.lastAutoReplyError = message;
       await saveBotState(env, item.botId, state);
@@ -342,6 +351,7 @@ async function autoReplyPendingMessages(env, runtime, options = {}) {
   const batchWaitMs = weixinBatchWaitRemaining(pending.map(item => item.message), flag?.pendingMarkedAt);
   if (batchWaitMs > 0) return { status: "collecting", pending: pending.length, sent: 0, waitMs: batchWaitMs };
 
+  if (options.loadRuntime) runtime = await options.loadRuntime();
   const latest = pending[pending.length - 1].message;
   const stopTyping = await startIlinkTyping(runtime.bot?.botToken, latest.raw);
   try {
@@ -2079,6 +2089,20 @@ async function loadBotState(env, botId) {
   return await getObjectJson(env, path).catch(() => ({ botId, getUpdatesBuf: "" }));
 }
 
+async function loadPollingRuntime(env, item) {
+  const path = item.pollPath || `weixin-cloud/poll/${sanitizePathPart(item.botId)}.json`;
+  try {
+    return await getObjectJson(env, path);
+  } catch (err) {
+    // Do not amplify quota/network failures by fetching the multi-MB package.
+    if (!errorMessage(err).includes("object_not_found:")) throw err;
+  }
+  const runtime = await loadRuntimePackage(env, item);
+  const small = { bot: { id: runtime.bot.id, botToken: runtime.bot.botToken } };
+  await putObject(env, path, JSON.stringify(small), "application/json");
+  return small;
+}
+
 async function loadRuntimePackage(env, item) {
   const key = `${env.SUPABASE_URL || ""}/${env.SUPABASE_BUCKET || DEFAULT_BUCKET}/${item.path}`;
   const updatedAt = String(item.updatedAt || "");
@@ -2353,7 +2377,7 @@ const CLOUD_CRON_SECRET_PATH = "weixin-cloud/cron-secret.json";
 const CLOUD_ASSISTANT_STATE_PATH = "weixin-cloud/state/cloud-assistant.json";
 const CLOUD_CRON_JOB_NAME = "ai-phone-weixin-assistant";
 const CLOUD_CORE_CODE_PATH = "weixin-cloud/function-core.mjs";
-const REQUIRED_BUCKET_CORE_PROTOCOL_VERSION = 7;
+const REQUIRED_BUCKET_CORE_PROTOCOL_VERSION = 8;
 
 // ── 自更新加载器 ──
 // 小手机同步运行包时会把最新的 assistant-core.mjs 上传到桶里；这里每次运行
